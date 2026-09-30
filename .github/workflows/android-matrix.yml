@@ -1,0 +1,138 @@
+name: android-matrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:   { description: 'UUID', required: true, type: string }
+      app:          { description: 'App-Kennung', required: true, type: string }
+      package:      { description: 'Paketname', required: true, type: string }
+      build_id:     { description: 'UUID des Artefakts', required: true, type: string }
+      commit_sha:   { description: 'Commit-SHA', required: true, type: string }
+      artifact_name: { description: 'Artefaktname', required: true, type: string }
+      artifact_sha256: { description: 'SHA256', required: false, type: string }
+      version_name: { description: 'Version', required: false, type: string }
+      version_code: { description: 'Versionscode', required: false, type: string }
+      test_activity: { description: 'Launcher-Aktivitaet', required: false, type: string }
+      test_apk_name:
+        description: 'Dateiname des Test-APK (optional, fuer Instrumentation)'
+        required: false
+        type: string
+
+concurrency:
+  group: matrix-${{ inputs.app }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REQUEST_ID: ${{ inputs.request_id }}
+  APP_ID: ${{ inputs.app }}
+  PACKAGE: ${{ inputs.package }}
+  COMMIT_SHA: ${{ inputs.commit_sha }}
+  ARTIFACT_NAME: ${{ inputs.artifact_name }}
+  ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
+  VERSION_NAME: ${{ inputs.version_name }}
+  VERSION_CODE: ${{ inputs.version_code }}
+  MODE: standard
+
+jobs:
+  # Bewusst schlank: untere unterstuetzte API und aktuelle API.
+  # Kein kartesisches Produkt ohne Evidenz.
+  matrix:
+    include:
+      - api: '29'
+        tag: google_apis
+        label: 'untere-API'
+      - api: '34'
+        tag: google_apis
+        label: 'aktuelle-API'
+      - api: '34'
+        tag: google_apis
+        label: 'grosses-Display'
+        dpi: 420
+        resolution: 1440x3120
+
+  test:
+    name: ${{ matrix.label }} (API ${{ matrix.api }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Artefakt holen
+        env:
+          BRIDGE_URL: ${{ secrets.BRIDGE_URL }}
+          BRIDGE_TOKEN: ${{ secrets.BRIDGE_TOKEN }}
+          BUILD_ID: ${{ inputs.build_id }}
+        run: ./scripts/fetch-artifact.sh
+
+      - name: Emulator booten
+        env:
+          TARGET_API: ${{ matrix.api }}
+        run: ./scripts/boot-emulator.sh
+
+      - name: Geraetengroesse anpassen
+        run: |
+          if [ -n "${{ matrix.dpi }}" ]; then
+            adb shell wm size ${{ matrix.resolution }} >/dev/null 2>&1 || true
+            adb shell wm density ${{ matrix.dpi }} >/dev/null 2>&1 || true
+            sleep 3
+          fi
+
+      - name: Smoke-Ablauf
+        env:
+          TEST_ACTIVITY: ${{ inputs.test_activity }}
+        run: |
+          if [ -z "${{ inputs.test_activity }}" ]; then
+            echo "TEST_ACTIVITY=${PACKAGE}/.MainActivity" >> "$GITHUB_ENV"
+          else
+            echo "TEST_ACTIVITY=${{ inputs.test_activity }}" >> "$GITHUB_ENV"
+          fi
+          ./scripts/run-smoke.sh
+
+      - name: Instrumentationstests
+        id: instrumentation
+        if: ${{ inputs.test_apk_name != '' }}
+        run: |
+          EV="$RUNNER_TEMP/nectar-evidence"
+          mkdir -p "$EV/instrumentation"
+          # Test-APK kommt aus derselben privaten Bridge
+          BUILD_ID="${{ inputs.build_id }}"
+          ARTIFACT_NAME="${{ inputs.test_apk_name }}" \
+          BRIDGE_URL="${{ secrets.BRIDGE_URL }}" \
+          BRIDGE_TOKEN="${{ secrets.BRIDGE_TOKEN }}" \
+            ./scripts/fetch-artifact.sh
+          adb install -r -g "$ARTIFACT_PATH" 2>&1 | tee "$EV/instrumentation/install.txt"
+          set +e
+          adb shell am instrument -w -r -e package "$PACKAGE" \
+            > "$EV/instrumentation/run.txt" 2>&1
+          set -e
+          OK=$(grep -c "OK (" "$EV/instrumentation/run.txt" || true)
+          FAIL=$(grep -cE "FAILURES|Error|Exception" "$EV/instrumentation/run.txt" || true)
+          {
+            echo "INSTR_PASSED=$OK"
+            echo "INSTR_FAILED=$FAIL"
+          } >> "$GITHUB_ENV"
+          adb pull /sdcard/androidTest-results /  "$EV/instrumentation" 2>/dev/null || true
+
+      - name: Ergebnis normalisieren
+        env:
+          TESTS_PASSED: ${{ steps.instrumentation.outputs.INSTR_PASSED }}
+          TESTS_FAILED: ${{ steps.instrumentation.outputs.INSTR_FAILED }}
+        run: |
+          MATRIX_JSON='[{"api":"${{ matrix.api }}","label":"${{ matrix.label }}","tag":"google_apis","arch":"x86_64","acceleration":"software"}]'
+          export MATRIX_JSON
+          if [ "${CRASH_COUNT:-0}" -gt 0 ] || [ "${TESTS_FAILED:-0}" -gt 0 ]; then
+            echo "VERDICT=FAIL" >> "$GITHUB_ENV"
+          else
+            echo "VERDICT=PASS" >> "$GITHUB_ENV"
+          fi
+          ./scripts/normalize-result.sh
+
+      - name: Ergebnis-Beleg
+        uses: actions/upload-artifact@a5a2e3d4b0c7f0e1a2b3c4d5e6f7a8b9c0d1e2f3 # v4.6.0
+        with:
+          name: nectar-matrix-${{ inputs.app }}-${{ matrix.api }}-${{ matrix.label }}
+          path: ${{ runner.temp }}/nectar-evidence
+          retention-days: 7
+          if-no-files-found: error

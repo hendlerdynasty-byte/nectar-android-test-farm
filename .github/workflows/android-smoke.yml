@@ -1,0 +1,142 @@
+name: android-smoke
+
+# Nur manueller Start. Es gibt keinen push-, pull_request- oder
+# schedule-Trigger: der Test-Farm laeuft ausschliesslich auf explizite
+# Anforderung von Z Code, damit keine unbeabsichtigten Laeufe Kosten
+# oder Ressourcen verbrauchen.
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: 'UUID der Anfrage'
+        required: true
+        type: string
+      app:
+        description: 'Kanonische App-Kennung'
+        required: true
+        type: string
+      package:
+        description: 'Android-Paketname'
+        required: true
+        type: string
+      build_id:
+        description: 'Opake UUID des Artefakts auf der privaten Bridge'
+        required: true
+        type: string
+      commit_sha:
+        description: 'Commit-SHA des privaten App-Repositorys'
+        required: true
+        type: string
+      artifact_name:
+        description: 'Dateiname des Artefakts'
+        required: true
+        type: string
+      artifact_sha256:
+        description: 'Erwartete SHA256-Pruefsumme (fail closed)'
+        required: false
+        type: string
+      version_name:
+        description: 'Versionsname'
+        required: false
+        type: string
+      version_code:
+        description: 'Versionscode'
+        required: false
+        type: string
+      test_activity:
+        description: 'Launcher-Aktivitaet fuer Kaltstart'
+        required: false
+        type: string
+      target_api:
+        description: 'Android-API-Level'
+        required: false
+        default: '34'
+        type: string
+
+# GROSSZUGIG - Software-Emulation braucht lange zum Booten.
+concurrency:
+  group: smoke-${{ inputs.app }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REQUEST_ID: ${{ inputs.request_id }}
+  APP_ID: ${{ inputs.app }}
+  PACKAGE: ${{ inputs.package }}
+  COMMIT_SHA: ${{ inputs.commit_sha }}
+  ARTIFACT_NAME: ${{ inputs.artifact_name }}
+  ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
+  VERSION_NAME: ${{ inputs.version_name }}
+  VERSION_CODE: ${{ inputs.version_code }}
+  MODE: smoke
+
+jobs:
+  smoke:
+    name: Smoke auf API ${{ inputs.target_api }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Kurzer Kontext protokollieren
+        run: |
+          echo "app=$APP_ID package=$PACKAGE commit=${COMMIT_SHA:0:12} mode=$MODE"
+          echo "Kein Secret, keine URL und kein Artefaktinhalt wird ausgegeben."
+
+      - name: Erwartete Aktivitaet bestimmen
+        id: activity
+        run: |
+          ACT="${{ inputs.test_activity }}"
+          if [ -z "$ACT" ]; then
+            ACT=$(aapt dump badging "$GITHUB_WORKSPACE"/*.apk 2>/dev/null | grep -oE "package: name='[^']+'[^>]*launchable-activity: name='[^']+'" | head -1 | sed -E "s/.*name='([^']+)'.*name='([^']+)'.*/\1\/\2/" || true)
+          fi
+          if [ -z "$ACT" ] || [ "$ACT" = "/" ]; then
+            ACT="${PACKAGE}/.MainActivity"
+          fi
+          echo "activity=$ACT" >> "$GITHUB_OUTPUT"
+          echo "Testaktivitaet: $ACT"
+
+      - name: Artefakt von der privaten Bridge holen
+        env:
+          BRIDGE_URL: ${{ secrets.BRIDGE_URL }}
+          BRIDGE_TOKEN: ${{ secrets.BRIDGE_TOKEN }}
+          BUILD_ID: ${{ inputs.build_id }}
+        run: ./scripts/fetch-artifact.sh
+
+      - name: Emulator booten
+        env:
+          TARGET_API: ${{ inputs.target_api }}
+        run: ./scripts/boot-emulator.sh
+
+      - name: Smoke-Test ausfuehren
+        env:
+          TEST_ACTIVITY: ${{ steps.activity.outputs.activity }}
+        run: ./scripts/run-smoke.sh
+
+      - name: Ergebnis normalisieren
+        env:
+          MATRIX_JSON: '[{"api":"${{ inputs.target_api }}","tag":"google_apis","arch":"x86_64","acceleration":"software"}]'
+        run: |
+          if [ "${CRASH_COUNT:-0}" -gt 0 ]; then
+            echo "VERDICT=FAIL" >> "$GITHUB_ENV"
+          else
+            echo "VERDICT=PASS" >> "$GITHUB_ENV"
+          fi
+          ./scripts/normalize-result.sh
+
+      - name: Ergebnis als Beleg sichern
+        uses: actions/upload-artifact@a5a2e3d4b0c7f0e1a2b3c4d5e6f7a8b9c0d1e2f3 # v4.6.0
+        with:
+          name: nectar-result-${{ inputs.app }}-${{ inputs.request_id }}
+          path: ${{ runner.temp }}/nectar-evidence
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Ergebnis in die Zusammenfassung
+        run: |
+          {
+            echo "### Smoke: $APP_ID"
+            echo ""
+            cat "$RUNNER_TEMP/nectar-evidence/SUMMARY.md"
+          } >> "$GITHUB_STEP_SUMMARY"

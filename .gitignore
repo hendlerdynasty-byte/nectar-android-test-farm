@@ -1,0 +1,15 @@
+# Niemals private Artefakte oder Schluessel in dieses oeffentliche Repository
+*.apk
+*.aab
+*.jks
+*.keystore
+*.pem
+*.p12
+.env
+.env.*
+secrets/
+artifacts/
+result.json
+SUMMARY.md
+__pycache__/
+.DS_Store

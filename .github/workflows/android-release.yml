@@ -1,0 +1,172 @@
+name: android-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:    { description: 'UUID', required: true, type: string }
+      app:           { description: 'App-Kennung', required: true, type: string }
+      package:       { description: 'Paketname', required: true, type: string }
+      build_id:      { description: 'UUID des Artefakts', required: true, type: string }
+      commit_sha:    { description: 'Commit-SHA', required: true, type: string }
+      artifact_name: { description: 'Artefaktname (.apk oder .aab)', required: true, type: string }
+      artifact_sha256: { description: 'SHA256', required: false, type: string }
+      version_name:  { description: 'Version', required: true, type: string }
+      version_code:  { description: 'Versionscode', required: true, type: string }
+      test_activity: { description: 'Launcher-Aktivitaet', required: false, type: string }
+      release_candidate:
+        description: 'Release-Kandidaten-Kennung'
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ inputs.app }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REQUEST_ID: ${{ inputs.request_id }}
+  APP_ID: ${{ inputs.app }}
+  PACKAGE: ${{ inputs.package }}
+  COMMIT_SHA: ${{ inputs.commit_sha }}
+  ARTIFACT_NAME: ${{ inputs.artifact_name }}
+  ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
+  VERSION_NAME: ${{ inputs.version_name }}
+  VERSION_CODE: ${{ inputs.version_code }}
+  MODE: release
+
+jobs:
+  release:
+    name: Release-Gatter
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+
+    steps:
+      - name: Artefakt holen
+        env:
+          BRIDGE_URL: ${{ secrets.BRIDGE_URL }}
+          BRIDGE_TOKEN: ${{ secrets.BRIDGE_TOKEN }}
+          BUILD_ID: ${{ inputs.build_id }}
+        run: ./scripts/fetch-artifact.sh
+
+      - name: Artefakt-Typ pruefen
+        run: |
+          case "$ARTIFACT_NAME" in
+            *.aab)
+              echo "AAB erkannt - signierte Release-Artefakt";;
+            *.apk)
+              echo "APK erkannt - Debug-Artefakt ist KEIN Release-Nachweis"
+              echo "DEBUG_ARTIFACT=1" >> "$GITHUB_ENV";;
+            *) echo "FEHLGESCHLAGEN: unerwartete Artefaktendung"; exit 1;;
+          esac
+
+      - name: Debug-/Test-Assets suchen
+        id: assets
+        run: |
+          apk="$ARTIFACT_PATH"
+          [ -f "$apk" ] || { echo "FEHLGESCHLAGEN: Artefakt fehlt"; exit 1; }
+          BAD=""
+          # Debuggable-Flag
+          if "$ANDROID_HOME"/build-tools/*/aapt2 dump badging "$apk" 2>/dev/null | grep -q "application-debuggable"; then
+            BAD="debuggable"
+          fi
+          # Test-Instrumente im Artefakt
+          if unzip -l "$apk" 2>/dev/null | grep -qiE "androidTest|test/runner"; then
+            BAD="$BAD test-bundle"
+          fi
+          if [ -n "$BAD" ]; then
+            echo "GEFUNDEN: $BAD" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "ASSETS_FOUND=$BAD" >> "$GITHUB_ENV"
+          else
+            echo "ASSETS_FOUND=" >> "$GITHUB_ENV"
+            echo "Keine offensichtlichen Debug-/Test-Assets" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Emulator booten (Phone)
+        env: { TARGET_API: '34' }
+        run: ./scripts/boot-emulator.sh
+
+      - name: Smoke auf Phone
+        env: { TEST_ACTIVITY: ${{ inputs.test_activity }} }
+        run: |
+          echo "TEST_ACTIVITY=${{ inputs.test_activity || format('{0}/.MainActivity', env.PACKAGE) }}" >> "$GITHUB_ENV"
+          ./scripts/run-smoke.sh
+          PHONE_RESULT=$(cat "$RUNNER_TEMP/nectar-evidence/SUMMARY.md")
+          echo "$PHONE_RESULT" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Tablet / adaptives Layout
+        run: |
+          adb shell wm size 2560x1600 >/dev/null 2>&1 || true
+          adb shell wm density 240 >/dev/null 2>&1 || true
+          sleep 4
+          adb shell am force-stop "$PACKAGE" >/dev/null 2>&1 || true
+          adb shell am start -n "$TEST_ACTIVITY" >/dev/null 2>&1 || true
+          sleep 5
+          mkdir -p "$RUNNER_TEMP/nectar-evidence/screenshots"
+          adb shell screencap -p /sdcard/tablet.png >/dev/null 2>&1 || true
+          adb pull /sdcard/tablet.png "$RUNNER_TEMP/nectar-evidence/screenshots/tablet-layout.png" >/dev/null 2>&1 || true
+
+      - name: Offline-Pfad
+        run: |
+          mkdir -p "$RUNNER_TEMP/nectar-evidence/screenshots"
+          adb shell svc wifi disable >/dev/null 2>&1 || true
+          adb shell svc data disable >/dev/null 2>&1 || true
+          adb shell am force-stop "$PACKAGE" >/dev/null 2>&1 || true
+          adb shell am start -n "$TEST_ACTIVITY" >/dev/null 2>&1 || true
+          sleep 6
+          adb shell screencap -p /sdcard/offline.png >/dev/null 2>&1 || true
+          adb pull /sdcard/offline.png "$RUNNER_TEMP/nectar-evidence/screenshots/offline-path.png" >/dev/null 2>&1 || true
+          adb shell svc wifi enable >/dev/null 2>&1 || true
+
+      - name: Zustandswiederherstellung nach Prozessabbruch
+        run: |
+          adb shell am force-stop "$PACKAGE" >/dev/null 2>&1 || true
+          sleep 2
+          adb shell am start -n "$TEST_ACTIVITY" >/dev/null 2>&1 || true
+          sleep 5
+          RESUMED=$(adb shell dumpsys activity activities 2>/dev/null | grep -c "$PACKAGE" || true)
+          echo "Wiederhergestellte Aktivitaeten: $RESUMED" | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$RESUMED" -gt 0 ] && echo "RESUME_OK=1" >> "$GITHUB_ENV" || echo "RESUME_OK=0" >> "$GITHUB_ENV"
+
+      - name: Logcat sichern
+        run: |
+          mkdir -p "$RUNNER_TEMP/nectar-evidence/logcat"
+          adb logcat -d -v threadtime > "$RUNNER_TEMP/nectar-evidence/logcat/release-logcat.txt" 2>/dev/null || true
+
+      - name: Ergebnis normalisieren
+        run: |
+          MATRIX_JSON='[{"api":"34","label":"phone","acceleration":"software"},{"api":"34","label":"tablet","acceleration":"software"},{"api":"34","label":"offline","acceleration":"software"}]'
+          export MATRIX_JSON
+          BLOCKERS=""
+          [ "${DEBUG_ARTIFACT:-0}" = "1" ] && BLOCKERS="Debug-Artefakt - kein Release-Nachweis"
+          [ -n "${ASSETS_FOUND:-}" ] && BLOCKERS="$BLOCKERS;Test-Assets: ${ASSETS_FOUND}"
+          [ "${RESUME_OK:-0}" = "0" ] && BLOCKERS="$BLOCKERS;Zustandswiederherstellung fehlgeschlagen"
+          export BLOCKERS
+          if [ "${CRASH_COUNT:-0}" -gt 0 ] || [ -n "${BLOCKERS}" ]; then
+            echo "VERDICT=FAIL" >> "$GITHUB_ENV"
+          else
+            echo "VERDICT=PASS" >> "$GITHUB_ENV"
+          fi
+          ./scripts/normalize-result.sh
+
+      - name: Beleg sichern
+        uses: actions/upload-artifact@a5a2e3d4b0c7f0e1a2b3c4d5e6f7a8b9c0d1e2f3 # v4.6.0
+        with:
+          name: nectar-release-${{ inputs.app }}-${{ inputs.release_candidate }}
+          path: ${{ runner.temp }}/nectar-evidence
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Wichtige Abgrenzung festhalten
+        run: |
+          {
+            echo ""
+            echo "### Abgrenzung"
+            echo ""
+            echo "**Runtime-PASS ist kein Release-PASS.** Offen bleiben: Signierung,"
+            echo "Play-Richtlinien, Monetarisierung, Store-Eintrag, Datenschutzangabe"
+            echo "und Play-Rueckmeldung. Diese Gates sind nicht Teil des Runtime-Tests."
+            echo ""
+            echo "Release-Kandidat: \`${{ inputs.release_candidate }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

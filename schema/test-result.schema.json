@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nectar.hendler.dev/schema/test-result.schema.json",
+  "title": "NECTAR Remote-Test-Ergebnis",
+  "description": "Autoritatives Ergebnis eines Remote-Testlaufs.",
+  "type": "object",
+  "required": [
+    "schema_version", "request_id", "app", "package", "commit_sha",
+    "mode", "tests_passed", "tests_failed", "crashes", "anrs",
+    "infra_failures", "verdict", "evidence", "timestamp_utc"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "request_id": { "type": "string", "format": "uuid" },
+    "app": { "type": "string" },
+    "package": { "type": "string" },
+    "commit_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "artifact_sha256": { "type": "string" },
+    "version_name": { "type": "string" },
+    "version_code": { "type": "integer" },
+    "mode": { "type": "string", "enum": ["smoke", "standard", "release"] },
+    "matrix": { "type": "array", "items": { "type": "object" } },
+    "tests_passed": { "type": "integer", "minimum": 0 },
+    "tests_failed": { "type": "integer", "minimum": 0 },
+    "crashes": { "type": "integer", "minimum": 0 },
+    "anrs": { "type": "integer", "minimum": 0 },
+    "infra_failures": { "type": "integer", "minimum": 0 },
+    "verdict": {
+      "type": "string",
+      "enum": ["PASS", "FAIL", "INFRA_FAIL", "ZERO_COST_BLOCKED", "WAITING_FOR_NO_COST_QUOTA"],
+      "description": "PASS nur bei vollstaendig belegtem Ergebnis. INFRA_FAIL niemals als App-Defekt werten."
+    },
+    "blockers": { "type": "array", "items": { "type": "string" } },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "name"],
+        "properties": {
+          "type": { "type": "string", "enum": ["screenshot", "logcat", "test-report", "other"] },
+          "name": { "type": "string" },
+          "path": { "type": "string" }
+        }
+      }
+    },
+    "timestamp_utc": { "type": "string", "format": "date-time" }
+  }
+}

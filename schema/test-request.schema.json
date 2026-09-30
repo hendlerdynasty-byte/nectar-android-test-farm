@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nectar.hendler.dev/schema/test-request.schema.json",
+  "title": "NECTAR Remote-Test-Anfrage",
+  "description": "Maschinenlesbare Anfrage fuer den Android-Remote-Test. Enthaelt niemals Quellcode oder Secrets.",
+  "type": "object",
+  "required": ["request_id", "app", "package", "commit_sha", "mode", "build_id"],
+  "additionalProperties": false,
+  "properties": {
+    "request_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Eindeutige Kennung des Laufs."
+    },
+    "app": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Kanonische App-Kennung, z.B. wordgrid-dach."
+    },
+    "package": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-zA-Z][a-zA-Z0-9_]*(\\.[a-zA-Z][a-zA-Z0-9_]*)+$",
+      "description": "Android-Paketname."
+    },
+    "commit_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Vollstaendiger Commit-SHA des privaten App-Repositorys."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["smoke", "standard", "release"],
+      "description": "Testmodus."
+    },
+    "build_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Opake Kennung des Artefakts auf der privaten Bridge. Kein Pfad, keine URL."
+    },
+    "artifact_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+\\.(apk|aab)$",
+      "description": "Dateiname des Artefakts ohne Pfad."
+    },
+    "artifact_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Erwartete Pruefsumme. Wenn gesetzt, wird fail-closed geprueft."
+    },
+    "version_name": { "type": "string" },
+    "version_code": { "type": "integer", "minimum": 0 },
+    "test_activity": {
+      "type": "string",
+      "description": "Launcher-Aktivitaet fuer Kaltstart, z.B. app.paket/.MainActivity"
+    },
+    "matrix": {
+      "type": "array",
+      "description": "Gewuenschte Geraetekonfigurationen. Leer = Modus-Standard.",
+      "items": {
+        "type": "object",
+        "required": ["api", "tag"],
+        "properties": {
+          "api": { "type": "integer", "minimum": 21, "maximum": 36 },
+          "tag": { "type": "string" },
+          "arch": { "type": "string", "enum": ["x86_64", "arm64-v8a"] },
+          "dpi": { "type": "integer" },
+          "locale": { "type": "string" }
+        }
+      }
+    },
+    "reason": { "type": "string", "description": "Ausloeser oder Release-Kandidaten-Kennung." }
+  }
+}
