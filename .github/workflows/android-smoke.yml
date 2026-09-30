@@ -126,7 +126,7 @@ jobs:
           ./scripts/normalize-result.sh
 
       - name: Ergebnis als Beleg sichern
-        uses: actions/upload-artifact@a5a2e3d4b0c7f0e1a2b3c4d5e6f7a8b9c0d1e2f3 # v4.6.0
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nectar-result-${{ inputs.app }}-${{ inputs.request_id }}
           path: ${{ runner.temp }}/nectar-evidence
