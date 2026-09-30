@@ -38,7 +38,10 @@ case "$ARTIFACT_PATH" in
   *.aab)
     : "${BUNDLETOOL_JAR:?BUNDLETOOL_JAR fehlt}"
     APKS="${RUNNER_TEMP:-/tmp}/nectar-artifact/release.apks"
-    java -jar "$BUNDLETOOL_JAR" build-apks --bundle="$ARTIFACT_PATH" --output="$APKS" --connected-device --overwrite > "$EV/bundletool-build.txt" 2>&1 || { log "bundletool build-apks fehlgeschlagen"; exit 30; }
+    KS="${RUNNER_TEMP:-/tmp}/nectar-artifact/test-signing.jks"
+    KS_PASS=$(openssl rand -hex 24)
+    keytool -genkeypair -keystore "$KS" -storepass "$KS_PASS" -keypass "$KS_PASS" -alias nectar-test -keyalg RSA -keysize 2048 -validity 1 -dname 'CN=NECTAR temporary test signing' -noprompt >/dev/null 2>&1 || { log "Temporaere Testsignatur fehlgeschlagen"; exit 30; }
+    java -jar "$BUNDLETOOL_JAR" build-apks --bundle="$ARTIFACT_PATH" --output="$APKS" --mode=universal --ks="$KS" --ks-pass="pass:$KS_PASS" --ks-key-alias=nectar-test --key-pass="pass:$KS_PASS" --overwrite > "$EV/bundletool-build.txt" 2>&1 || { log "bundletool build-apks fehlgeschlagen"; exit 30; }
     INSTALL_OUT=$(java -jar "$BUNDLETOOL_JAR" install-apks --apks="$APKS" 2>&1) || { log "bundletool install-apks fehlgeschlagen: $INSTALL_OUT"; exit 30; }
     echo "AAB_INSTALLED=1" >> "$GITHUB_ENV"
     ;;
