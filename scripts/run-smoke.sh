@@ -98,7 +98,6 @@ log "Rotation geprueft"
   # die Zeilenzahl intakt.
   CRASH_COUNT=$( { grep -cE "FATAL EXCEPTION|ANR in ${PACKAGE}|am_crash.*${PACKAGE}" \
                  "$EV/logcat/full-logcat.txt" 2>/dev/null || true; } | head -1 )
-              "$EV/logcat/full-logcat.txt" 2>/dev/null | head -1)
 CRASH_COUNT="${CRASH_COUNT:-0}"
 case "$CRASH_COUNT" in ''|*[!0-9]*) CRASH_COUNT=0 ;; esac
 log "Gefundene Crash-/ANR-Eintraege: ${CRASH_COUNT}"
