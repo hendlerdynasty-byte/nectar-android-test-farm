@@ -12,38 +12,92 @@
 #   TARGET_API   Android-API-Level (Standard 34)
 #   TARGET_TAG   System-Image-Tag (Standard google_apis)
 #   TARGET_ARCH  Architektur (Standard x86_64)
-set -euo pipefail
+set -uo pipefail
 
 TARGET_API="${TARGET_API:-34}"
 TARGET_TAG="${TARGET_TAG:-google_apis}"
 TARGET_ARCH="${TARGET_ARCH:-x86_64}"
 
 log() { printf '%s [boot-emulator] %s\n' "$(date -u +%FT%TZ)" "$1" >&2; }
+die()  { log "FEHLGESCHLAGEN: $1"; exit "${2:-20}"; }
 
-log "KVM-Verfuegbarkeit pruefen"
+# ── Werkzeuge ueber absolute Pfade auffinden ───────────────────
+# Der Runner setzt ANDROID_HOME, aber NICHT den cmdline-tools-Pfad.
+# Ohne diese Aufloesung endet jedes Skript mit exit 127.
+SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+[ -d "$SDK" ] || die "ANDROID_HOME nicht gefunden (${SDK})" 25
+
+find_tool() {
+  local name="$1" cand
+  cand="$(command -v "$name" 2>/dev/null || true)"
+  if [ -n "$cand" ] && [ -x "$cand" ]; then echo "$cand"; return 0; fi
+  # Bekannte Orte in den cmdline-tools-Versionen
+  for p in "$SDK"/cmdline-tools/*/bin/"$name" \
+           "$SDK"/tools/bin/"$name" \
+           "$SDK"/emulator/"$name"; do
+    [ -x "$p" ] && { echo "$p"; return 0; }
+  done
+  return 1
+}
+
+SDKMANAGER="$(find_tool sdkmanager || true)"
+AVDMANAGER="$(find_tool avdmanager || true)"
+EMULATOR="$(find_tool emulator || true)"
+ADB="$(find_tool adb || true)"
+
+log "SDK: ${SDK}"
+log "sdkmanager:  ${SDKMANAGER:-FEHLT}"
+log "avdmanager:  ${AVDMANAGER:-FEHLT}"
+log "emulator:    ${EMULATOR:-FEHLT}"
+log "adb:         ${ADB:-FEHLT}"
+
+[ -n "$SDKMANAGER" ] || die "sdkmanager nicht gefunden" 26
+[ -n "$AVDMANAGER" ] || die "avdmanager nicht gefunden" 27
+[ -n "$EMULATOR" ]   || die "emulator nicht gefunden" 28
+[ -n "$ADB" ]        || die "adb nicht gefunden" 29
+
+# ── KVM pruefen ────────────────────────────────────────────────
 if [ -e /dev/kvm ] && [ -r /dev/kvm ]; then
   log "/dev/kvm vorhanden - Hardware-Beschleunigung moeglich"
   ACCEL_FLAG=""
+  ACCEL_MODE="hardware"
 else
   log "kein /dev/kvm - Software-Emulation (langsamer Boot, 0 EUR)"
   ACCEL_FLAG="-accel off"
+  ACCEL_MODE="software"
 fi
 
-AVD_NAME="nectar-api${TARGET_API}"
+# ── Lizenzen annehmen ──────────────────────────────────────────
+# "yes | sdkmanager --licenses" erzeugt absichtlich einen Broken Pipe.
+# Deshalb: kein set -e, Ausgabe unterdruecken, Fehler tolerieren.
+{
+  yes 2>/dev/null || true
+} | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+log "Lizenzen akzeptiert (best effort)"
+
+# ── System-Image ───────────────────────────────────────────────
 SYSTEM_IMAGE="system-images;android-${TARGET_API};${TARGET_TAG};${TARGET_ARCH}"
-
 log "System-Image sicherstellen: ${SYSTEM_IMAGE}"
-yes | sdkmanager --licenses >/dev/null 2>&1 || true
-sdkmanager "${SYSTEM_IMAGE}" >/dev/null 2>&1
+"$SDKMANAGER" "${SYSTEM_IMAGE}" >/dev/null 2>&1 || true
 
+# Bereits im Image vorhanden?
+if [ -d "${SDK}/system-images/android-${TARGET_API}/${TARGET_TAG}/${TARGET_ARCH}" ]; then
+  log "System-Image war bereits vorhanden"
+else
+  log "HINWEIS: System-Image-Verzeichnis fehlt weiterhin - Boot wird vermutlich scheitern"
+fi
+
+# ── AVD anlegen ────────────────────────────────────────────────
+AVD_NAME="nectar-api${TARGET_API}"
 log "AVD anlegen: ${AVD_NAME}"
-echo "no" | avdmanager create avd \
-  -n "${AVD_NAME}" \
-  -k "${SYSTEM_IMAGE}" \
-  --force >/dev/null 2>&1
+{
+  echo "no"
+} | "$AVDMANAGER" create avd -n "${AVD_NAME}" -k "${SYSTEM_IMAGE}" --force >/dev/null 2>&1 || true
+log "AVD-Liste: $("$AVDMANAGER" list avd 2>/dev/null | grep -c "${AVD_NAME}" || echo 0) Treffer"
 
-log "Emulator starten"
-nohup emulator \
+# ── Emulator starten ────────────────────────────────────────────
+log "Emulator starten (${ACCEL_MODE})"
+nohup "$EMULATOR" \
   -avd "${AVD_NAME}" \
   -no-window \
   -no-audio \
@@ -56,52 +110,58 @@ nohup emulator \
   > /tmp/emulator.log 2>&1 &
 
 EMU_PID=$!
-log "Emulator-Prozess ${EMU_PID}, warte auf sys.boot_completed (max 20 min)"
+log "Emulator-Prozess ${EMU_PID}, warte auf sys.boot_completed"
 
-BOOT_TIMEOUT=1200
-WAITED=0
-until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r\n ')" = "1" ]; do
-  sleep 10
-  WAITED=$((WAITED + 10))
-  if [ "${WAITED}" -ge "${BOOT_TIMEOUT}" ]; then
-    log "FEHLGESCHLAGEN: Emulator nach ${BOOT_TIMEOUT}s nicht gebootet"
-    tail -40 /tmp/emulator.log >&2 || true
-    exit 20
-  fi
-  # Prozess-Drama frueh erkennen
-  if ! kill -0 "${EMU_PID}" 2>/dev/null; then
-    log "FEHLGESCHLAGEN: Emulatorprozess beendet"
-    tail -40 /tmp/emulator.log >&2 || true
-    exit 21
-  fi
-  if [ $((WAITED % 120)) -eq 0 ]; then
-    log "  ... wartet noch (${WAITED}s)"
-  fi
+# adb auf den Server warten
+"$ADB" start-server >/dev/null 2>&1 || true
+for i in $(seq 1 30); do
+  "$ADB" devices 2>/dev/null | grep -q "device$" && break
+  sleep 5
 done
 
+BOOT_TIMEOUT=1500
+WAITED=0
+BOOTED=0
+until [ "$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r\n ')" = "1" ]; do
+  sleep 15
+  WAITED=$((WAITED + 15))
+  if ! kill -0 "${EMU_PID}" 2>/dev/null; then
+    log "Emulatorprozess beendet - Log:"
+    tail -30 /tmp/emulator.log >&2 || true
+    die "Emulatorprozess beendet" 21
+  fi
+  if [ "${WAITED}" -ge "${BOOT_TIMEOUT}" ]; then
+    log "Log des Emulators:"
+    tail -30 /tmp/emulator.log >&2 || true
+    die "Emulator nach ${BOOT_TIMEOUT}s nicht gebootet" 20
+  fi
+  [ $((WAITED % 120)) -eq 0 ] && log "  ... wartet noch (${WAITED}s)"
+done
+BOOTED=1
 log "Gebootet nach ${WAITED}s"
 
-# Wichtige Vorkehrungen: Bildschirm an, Wecker aus, entsperrt
-adb shell input keyevent 82 >/dev/null 2>&1 || true
-adb shell settings put global window_animation_scale 0 >/dev/null 2>&1 || true
-adb shell settings put global transition_animation_scale 0 >/dev/null 2>&1 || true
-adb shell settings put global animator_duration_scale 0 >/dev/null 2>&1 || true
-adb shell svc wifi disable >/dev/null 2>&1 || true
-adb shell svc power stayon true >/dev/null 2>&1 || true
+# ── Geraet vorbereiten ─────────────────────────────────────────
+"$ADB" shell input keyevent 82 >/dev/null 2>&1 || true
+"$ADB" shell settings put global window_animation_scale 0 >/dev/null 2>&1 || true
+"$ADB" shell settings put global transition_animation_scale 0 >/dev/null 2>&1 || true
+"$ADB" shell settings put global animator_duration_scale 0 >/dev/null 2>&1 || true
+"$ADB" shell svc wifi disable >/dev/null 2>&1 || true
+"$ADB" shell svc power stayon true >/dev/null 2>&1 || true
 
-DEVICE_SERIAL=$(adb devices | awk 'NR==2{print $1}')
-[ -n "$DEVICE_SERIAL" ] || { log "FEHLGESCHLAGEN: kein Geraet sichtbar"; exit 22; }
-API_LEVEL=$(adb shell getprop ro.build.version.sdk | tr -d '\r\n ')
-MODEL=$(adb shell getprop ro.product.model | tr -d '\r\n ')
-RELEASE=$(adb shell getprop ro.build.version.release | tr -d '\r\n ')
+DEVICE_SERIAL="$("$ADB" devices | awk 'NR==2{print $1}')"
+[ -n "$DEVICE_SERIAL" ] || die "kein Geraet sichtbar" 22
+API_LEVEL="$("$ADB" shell getprop ro.build.version.sdk | tr -d '\r\n ')"
+MODEL="$("$ADB" shell getprop ro.product.model | tr -d '\r\n ')"
+RELEASE="$("$ADB" shell getprop ro.build.version.release | tr -d '\r\n ')"
 
 {
-  echo "DEVICE_SERIAL=$DEVICE_SERIAL"
-  echo "DEVICE_API=$API_LEVEL"
-  echo "DEVICE_MODEL=$MODEL"
-  echo "DEVICE_RELEASE=$RELEASE"
-  echo "DEVICE_AVD=$AVD_NAME"
-  echo "ACCELERATION=$([ -n "$ACCEL_FLAG" ] && echo software || echo hardware)"
-} >> "$GITHUB_ENV"
+  echo "DEVICE_SERIAL=${DEVICE_SERIAL}"
+  echo "DEVICE_API=${API_LEVEL}"
+  echo "DEVICE_MODEL=${MODEL}"
+  echo "DEVICE_RELEASE=${RELEASE}"
+  echo "DEVICE_AVD=${AVD_NAME}"
+  echo "ACCELERATION=${ACCEL_MODE}"
+  echo "BOOT_SECONDS=${WAITED}"
+} >> "${GITHUB_ENV}"
 
-log "Bereit: ${MODEL}, API ${API_LEVEL} (Android ${RELEASE}), serielle ${DEVICE_SERIAL}"
+log "Bereit: ${MODEL}, API ${API_LEVEL} (Android ${RELEASE})"
