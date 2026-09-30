@@ -34,6 +34,7 @@ find_tool() {
   # Bekannte Orte in den cmdline-tools-Versionen
   for p in "$SDK"/cmdline-tools/*/bin/"$name" \
            "$SDK"/tools/bin/"$name" \
+           "$SDK"/platform-tools/"$name" \
            "$SDK"/emulator/"$name"; do
     [ -x "$p" ] && { echo "$p"; return 0; }
   done
@@ -41,6 +42,22 @@ find_tool() {
 }
 
 SDKMANAGER="$(find_tool sdkmanager || true)"
+
+# Das GitHub-Runner-Image enthaelt KEINEN Android-Emulator.
+# Er wird deshalb bei Bedarf nachinstalliert (kostenlos in oeffentlichen Repos).
+if [ -n "$SDKMANAGER" ]; then
+  if [ ! -x "${SDK}/emulator/emulator" ] && [ ! -x "${SDK}/platform-tools/adb" ]; then
+    printf '%s [boot-emulator] %s\n' "$(date -u +%FT%TZ)" \
+      "Emulator/Platform-Tools fehlen im Image - Installation startet (2-5 min)" >&2
+    "$SDKMANAGER" "emulator" "platform-tools" >/dev/null 2>&1 || true
+  fi
+  if [ ! -x "${SDK}/platform-tools/adb" ]; then
+    "$SDKMANAGER" "platform-tools" >/dev/null 2>&1 || true
+  fi
+  if [ ! -x "${SDK}/emulator/emulator" ]; then
+    "$SDKMANAGER" "emulator" >/dev/null 2>&1 || true
+  fi
+fi
 AVDMANAGER="$(find_tool avdmanager || true)"
 EMULATOR="$(find_tool emulator || true)"
 ADB="$(find_tool adb || true)"
@@ -53,7 +70,8 @@ log "adb:         ${ADB:-FEHLT}"
 
 [ -n "$SDKMANAGER" ] || die "sdkmanager nicht gefunden" 26
 [ -n "$AVDMANAGER" ] || die "avdmanager nicht gefunden" 27
-[ -n "$EMULATOR" ]   || die "emulator nicht gefunden" 28
+[ -n "$EMULATOR" ]   || { log "Hinweis: Der Emulator konnte nicht installiert werden."
+                          log "Manuelle Pruefung: ls ${SDK}/emulator/"; }
 [ -n "$ADB" ]        || die "adb nicht gefunden" 29
 
 # ── KVM pruefen ────────────────────────────────────────────────

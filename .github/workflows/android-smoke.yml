@@ -76,7 +76,7 @@ jobs:
   smoke:
     name: Smoke auf API ${{ inputs.target_api }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Repository auschecken
