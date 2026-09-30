@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Fail-closed runtime evidence. No missing launch/screenshot/log can become PASS."""
-import datetime,hashlib,json,os,re,subprocess,sys,time
+import datetime,hashlib,json,os,re,subprocess,sys,time,xml.etree.ElementTree as ET
 from pathlib import Path
 def main(work):
     q=json.loads((work/'request.json').read_text());sdk=os.environ.get('ANDROID_HOME','/usr/local/lib/android/sdk');adb=str(Path(sdk)/'platform-tools/adb');checks=[];logs=[]
@@ -43,6 +43,34 @@ def main(work):
         call('shell','settings','put','system','accelerometer_rotation','0');call('shell','settings','put','system','user_rotation','1');time.sleep(2);capture('landscape')
         call('shell','am','force-stop',q['package']);p=call('shell','am','start','-W','-n',activity);time.sleep(2)
         check('restart',p.returncode==0 and bool(call('shell','pidof',q['package']).stdout.strip()))
+        # Optional generic private request steps; app-specific selectors travel encrypted.
+        def ui():
+            p=call('shell','uiautomator','dump','/sdcard/window.xml',timeout=60)
+            if p.returncode:raise RuntimeError('UI_DUMP_INFRA')
+            raw=call('shell','cat','/sdcard/window.xml').stdout
+            try:root=ET.fromstring(raw)
+            except ET.ParseError:raise RuntimeError('INVALID_UI_TREE_INFRA')
+            return root,raw
+        steps=q.get('ui_steps',[])
+        if len(steps)>40:raise RuntimeError('TOO_MANY_UI_STEPS')
+        for ordinal,step in enumerate(steps):
+            kind=step.get('kind');name='flow_'+str(ordinal)+'_'+str(kind)
+            if kind=='tap_text':
+                root,raw=ui();needle=step['text'];nodes=[n for n in root.iter('node') if needle in n.get('text','')]
+                if not check(name+'_selector',bool(nodes)):continue
+                bounds=re.fullmatch(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]',nodes[0].get('bounds',''))
+                if not bounds:raise RuntimeError('INVALID_UI_BOUNDS_INFRA')
+                x1,y1,x2,y2=map(int,bounds.groups());p=call('shell','input','tap',str((x1+x2)//2),str((y1+y2)//2));check(name,p.returncode==0);time.sleep(1)
+            elif kind=='expect_text':
+                root,raw=ui();check(name,any(step['text'] in n.get('text','') for n in root.iter('node')))
+            elif kind=='expect_absent':
+                root,raw=ui();check(name,not any(step['text'] in n.get('text','') for n in root.iter('node')))
+            elif kind=='process_death_resume':
+                call('shell','input','keyevent','3');time.sleep(1);call('shell','am','kill',q['package']);time.sleep(2)
+                check(name+'_process_dead',not call('shell','pidof',q['package']).stdout.strip())
+                p=call('shell','am','start','-W','-n',activity);time.sleep(2);check(name+'_relaunch',p.returncode==0)
+            else:raise RuntimeError('UNSUPPORTED_PRIVATE_FLOW_STEP')
+        if steps:capture('flow_complete')
         l=call('logcat','-d','-v','threadtime','-t','2500',timeout=60);(work/'logcat.txt').write_text(l.stdout)
         check('logcat_available',l.returncode==0 and bool(l.stdout.strip()))
         blocks=re.split(r'(?=FATAL EXCEPTION)',l.stdout)
