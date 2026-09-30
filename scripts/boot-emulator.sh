@@ -195,4 +195,13 @@ RELEASE="$("$ADB" shell getprop ro.build.version.release | tr -d '\r\n ')"
   echo "BOOT_SECONDS=${WAITED}"
 } >> "${GITHUB_ENV}"
 
+# Werkzeugpfade fuer die Folgeschritte exportieren.
+# GitHub-Runner setzt ANDROID_HOME, aber platform-tools und emulator
+# liegen NICHT im PATH. Ohne dieses export scheitert jedes
+# nachfolgende Skript mit "command not found".
+for d in "$SDK/platform-tools" "$SDK/emulator" "$SDK/cmdline-tools/latest/bin"; do
+  [ -d "$d" ] && export PATH="$SDK/platform-tools:$SDK/emulator:$SDK/cmdline-tools/latest/bin:$PATH"
+done
+log "PATH ergaenzt: $(command -v adb) / $(command -v emulator)"
+
 log "Bereit: ${MODEL}, API ${API_LEVEL} (Android ${RELEASE})"

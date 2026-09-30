@@ -11,9 +11,16 @@ mkdir -p "$EV/screenshots" "$EV/logcat"
 
 log() { printf '%s [smoke] %s\n' "$(date -u +%FT%TZ)" "$1" >&2; }
 
+# adb nicht unbedingt im PATH (GitHub-Runner)
+SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+ADB="$(command -v adb 2>/dev/null || true)"
+[ -n "$ADB" ] || ADB="${SDK}/platform-tools/adb"
+[ -x "$ADB" ] || { log "FEHLGESCHLAGEN: adb nicht gefunden"; exit 40; }
+log "adb: $ADB"
+
 # 1) Vorhandene Version entfernen und frisch installieren
 log "Deinstallation eines vorhandenen Standes"
-adb uninstall "$PACKAGE" >/dev/null 2>&1 || true
+"$ADB" uninstall "$PACKAGE" >/dev/null 2>&1 || true
 
 log "Installation"
 INSTALL_OUT=$(adb install -r -g "$ARTIFACT_PATH" 2>&1) || {
@@ -29,12 +36,12 @@ else
 fi
 
 # 2) Kaltstart messen: Prozess vor dem Start zuruecksetzen
-adb shell am force-stop "$PACKAGE" >/dev/null 2>&1 || true
-adb logcat -c >/dev/null 2>&1 || true
+"$ADB" shell am force-stop "$PACKAGE" >/dev/null 2>&1 || true
+"$ADB" logcat -c >/dev/null 2>&1 || true
 
 log "Kaltstart der Hauptaktivitaet: $TEST_ACTIVITY"
 START_TS=$(date +%s%3N)
-adb shell am start -W -S -n "$TEST_ACTIVITY" > "$EV/activity-start.txt" 2>&1 || true
+"$ADB" shell am start -W -S -n "$TEST_ACTIVITY" > "$EV/activity-start.txt" 2>&1 || true
 END_TS=$(date +%s%3N)
 COLD_START_MS=$((END_TS - START_TS))
 echo "COLD_START_MS=${COLD_START_MS}" >> "$GITHUB_ENV"
@@ -42,27 +49,27 @@ log "Kaltstart: ${COLD_START_MS} ms"
 
 # 3) Auf die App reagieren lassen
 sleep 6
-adb shell input keyevent 3 >/dev/null 2>&1 || true   # Home
+"$ADB" shell input keyevent 3 >/dev/null 2>&1 || true   # Home
 sleep 2
-adb shell am start -n "$TEST_ACTIVITY" >/dev/null 2>&1 || true
+"$ADB" shell am start -n "$TEST_ACTIVITY" >/dev/null 2>&1 || true
 sleep 4
 
 # 4) Screenshot-Beweis
-adb shell screencap -p /sdcard/nectar-smoke.png >/dev/null 2>&1 || true
-adb pull /sdcard/nectar-smoke.png "$EV/screenshots/smoke-foreground.png" >/dev/null 2>&1 || true
+"$ADB" shell screencap -p /sdcard/nectar-smoke.png >/dev/null 2>&1 || true
+"$ADB" pull /sdcard/nectar-smoke.png "$EV/screenshots/smoke-foreground.png" >/dev/null 2>&1 || true
 log "Screenshot gesichert"
 
 # 5) Rotation / Resume
-adb shell settings put system accelerometer_rotation 0 >/dev/null 2>&1 || true
-adb shell settings put system user_rotation 1 >/dev/null 2>&1 || true
+"$ADB" shell settings put system accelerometer_rotation 0 >/dev/null 2>&1 || true
+"$ADB" shell settings put system user_rotation 1 >/dev/null 2>&1 || true
 sleep 3
-adb shell screencap -p /sdcard/nectar-landscape.png >/dev/null 2>&1 || true
-adb pull /sdcard/nectar-landscape.png "$EV/screenshots/smoke-landscape.png" >/dev/null 2>&1 || true
-adb shell settings put system user_rotation 0 >/dev/null 2>&1 || true
+"$ADB" shell screencap -p /sdcard/nectar-landscape.png >/dev/null 2>&1 || true
+"$ADB" pull /sdcard/nectar-landscape.png "$EV/screenshots/smoke-landscape.png" >/dev/null 2>&1 || true
+"$ADB" shell settings put system user_rotation 0 >/dev/null 2>&1 || true
 log "Rotation geprueft"
 
 # 6) Logcat sichern
-adb logcat -d -v threadtime > "$EV/logcat/full-logcat.txt" 2>/dev/null || true
+"$ADB" logcat -d -v threadtime > "$EV/logcat/full-logcat.txt" 2>/dev/null || true
 
 # 7) Absturz- und ANR-Erkennung
 CRASH_COUNT=$(grep -cE "FATAL EXCEPTION|ANR in $PACKAGE|am_crash.*$PACKAGE" "$EV/logcat/full-logcat.txt" 2>/dev/null || echo 0)
