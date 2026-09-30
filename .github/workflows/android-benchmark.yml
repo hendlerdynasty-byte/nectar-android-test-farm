@@ -1,0 +1,70 @@
+name: android-benchmark
+# Explicit one-off comparison; never changes the normal runner automatically.
+on:
+  workflow_dispatch:
+    inputs:
+      request_id: { description: 'UUID', required: true, type: string }
+      app: { description: 'App-Kennung', required: true, type: string }
+      package: { description: 'Paketname', required: true, type: string }
+      build_id_ubuntu: { description: 'Einmalige Bridge-UUID fuer Ubuntu', required: true, type: string }
+      build_id_macos: { description: 'Einmalige Bridge-UUID fuer macOS', required: true, type: string }
+      commit_sha: { description: 'Commit-SHA', required: true, type: string }
+      artifact_name: { description: 'APK-Dateiname', required: true, type: string }
+      artifact_sha256: { description: 'SHA256', required: true, type: string }
+      target_api: { description: 'Identische API fuer beide Jobs', required: true, type: string }
+permissions:
+  contents: read
+env:
+  REQUEST_ID: ${{ inputs.request_id }}
+  APP_ID: ${{ inputs.app }}
+  PACKAGE: ${{ inputs.package }}
+  COMMIT_SHA: ${{ inputs.commit_sha }}
+  ARTIFACT_NAME: ${{ inputs.artifact_name }}
+  ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
+  MODE: smoke
+jobs:
+  compare:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            build_id: ${{ inputs.build_id_ubuntu }}
+          - runner: macos-15-intel
+            build_id: ${{ inputs.build_id_macos }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Artefakt einmalig holen
+        env:
+          BRIDGE_URL: ${{ secrets.BRIDGE_URL }}
+          BRIDGE_TOKEN: ${{ secrets.BRIDGE_TOKEN }}
+          BUILD_ID: ${{ matrix.build_id }}
+        run: ./scripts/fetch-artifact.sh
+      - name: Identische API pruefen
+        env:
+          REQUESTED_API: ${{ inputs.target_api }}
+        run: ./scripts/select-target-api.sh
+      - name: Emulator starten
+        run: ./scripts/boot-emulator.sh
+      - name: Identischen Smoke-Test ausfuehren
+        run: ./scripts/run-smoke.sh
+      - name: Vergleichsergebnis
+        if: always()
+        run: |
+          if [ "${INSTALL_OK:-0}" = 1 ] && [ "${SHOT_OK:-0}" = 1 ] && [ "${SCREEN_STATE:-}" = content ] && [ "${CRASH_COUNT:-0}" = 0 ]; then VERDICT=PASS; else VERDICT=FAIL; BLOCKER='Benchmark-Smoke ohne vollstaendigen Beleg'; fi
+          export VERDICT BLOCKER
+          MATRIX_JSON="[{\"api\":\"${TARGET_API:-unknown}\",\"runner\":\"${{ matrix.runner }}\",\"acceleration\":\"${ACCELERATION:-unknown}\",\"boot_seconds\":\"${BOOT_SECONDS:-unknown}\",\"cold_start_ms\":\"${COLD_START_MS:-unknown}\"}]"
+          export MATRIX_JSON
+          ./scripts/normalize-result.sh
+      - name: Beleg sichern
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nectar-benchmark-${{ matrix.runner }}-${{ inputs.request_id }}
+          path: ${{ runner.temp }}/nectar-evidence
+          retention-days: 7
+          if-no-files-found: error
