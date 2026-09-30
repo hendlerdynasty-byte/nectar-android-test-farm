@@ -89,8 +89,8 @@ echo "SHOT_OK=$SHOT_OK" >> "$GITHUB_ENV"
 "$ADB" shell settings put system accelerometer_rotation 0 >/dev/null 2>&1 || true
 "$ADB" shell settings put system user_rotation 1 >/dev/null 2>&1 || true
 sleep 3
-"$ADB" shell screencap -p /sdcard/nectar-landscape.png >/dev/null 2>&1 || true
-"$ADB" pull /sdcard/nectar-landscape.png "$EV/screenshots/smoke-landscape.png" >/dev/null 2>&1 || true
+  # Auch hier exec-out statt shell + pull (siehe Kommentar beim Hauptscreenshot)
+  timeout 45 "$ADB" exec-out screencap -p > "$EV/screenshots/smoke-landscape.png" 2>/dev/null || true
 "$ADB" shell settings put system user_rotation 0 >/dev/null 2>&1 || true
 log "Rotation geprueft"
 
