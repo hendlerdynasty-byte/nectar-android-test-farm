@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Fail-closed runtime evidence. No missing launch/screenshot/log can become PASS."""
-import datetime,hashlib,json,os,re,subprocess,sys,time,xml.etree.ElementTree as ET
+import datetime,hashlib,json,os,re,subprocess,sys,time,tempfile,urllib.request,xml.etree.ElementTree as ET
 from pathlib import Path
 def main(work):
     q=json.loads((work/'request.json').read_text());sdk=os.environ.get('ANDROID_HOME','/usr/local/lib/android/sdk');adb=str(Path(sdk)/'platform-tools/adb');checks=[];logs=[]
@@ -27,6 +27,18 @@ def main(work):
         if not check('install',ins.returncode==0 and 'Success' in ins.stdout):
             if any(x in ins.stdout+ins.stderr for x in ['INSTALL_FAILED','Failure [']):result['verdict']='APP_FAIL';return
             raise RuntimeError('ADB_INSTALL_INFRA')
+        assets=q.get('test_public_assets',[])
+        if len(assets)>3:raise RuntimeError('ASSET_COUNT_LIMIT')
+        for asset in assets:
+            url=asset['url'];name=asset['filename']
+            if not url.startswith('https://raw.githubusercontent.com/') or not re.fullmatch(r'[A-Za-z0-9_-][A-Za-z0-9_.-]{0,79}',name):raise RuntimeError('UNSUPPORTED_PUBLIC_ASSET')
+            with urllib.request.urlopen(url,timeout=60) as response:raw=response.read(20_000_001)
+            if len(raw)>20_000_000 or hashlib.sha256(raw).hexdigest()!=asset['sha256']:raise RuntimeError('PUBLIC_ASSET_INTEGRITY_FAILURE')
+            with tempfile.TemporaryDirectory(prefix='nectar-public-natural-') as temp:
+                f=Path(temp)/name;f.write_bytes(raw);push=call('push',str(f),'/sdcard/Download/'+name,timeout=60)
+                if push.returncode:raise RuntimeError('PUBLIC_ASSET_PUSH_FAILURE')
+            call('shell','am','broadcast','-a','android.intent.action.MEDIA_SCANNER_SCAN_FILE','-d','file:///sdcard/Download/'+name)
+            check('public_asset_hash_verified',True)
         act=call('shell','cmd','package','resolve-activity','--brief',q['package']).stdout.strip().splitlines()
         activity=next((x for x in reversed(act) if '/' in x and q['package'] in x),None)
         if not check('launcher_resolved',activity is not None):result['verdict']='APP_FAIL';return
@@ -57,8 +69,8 @@ def main(work):
         if len(steps)>40:raise RuntimeError('TOO_MANY_UI_STEPS')
         for ordinal,step in enumerate(steps):
             kind=step.get('kind');name='flow_'+str(ordinal)+'_'+str(kind)
-            if kind=='tap_text':
-                root,raw=ui();needle=step['text'];nodes=[n for n in root.iter('node') if (n.get('text','')==needle if step.get('exact') else needle in n.get('text',''))]
+            if kind in ('tap_text','tap_description'):
+                root,raw=ui();needle=step['text'];attribute='content-desc' if kind=='tap_description' else 'text';nodes=[n for n in root.iter('node') if (n.get(attribute,'')==needle if step.get('exact') else needle in n.get(attribute,''))]
                 if not check(name+'_selector',bool(nodes)):raise RuntimeError('UI_SELECTOR_UNRESOLVED_CHECK_SCROLL_OR_SCENARIO')
                 bounds=re.fullmatch(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]',nodes[0].get('bounds',''))
                 if not bounds:raise RuntimeError('INVALID_UI_BOUNDS_INFRA')
