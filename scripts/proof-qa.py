@@ -69,7 +69,12 @@ def main(work):
         if len(steps)>40:raise RuntimeError('TOO_MANY_UI_STEPS')
         for ordinal,step in enumerate(steps):
             kind=step.get('kind');name='flow_'+str(ordinal)+'_'+str(kind)
-            if kind in ('tap_text','tap_description'):
+            if kind=='input_text':
+                value=step.get('text','')
+                if not re.fullmatch(r'[A-Za-z0-9 ]{1,120}',value):raise RuntimeError('UNSUPPORTED_TEXT_INJECTION_ALPHABET')
+                p=call('shell','input','text',value.replace(' ','%s'));check(name,p.returncode==0);time.sleep(1)
+                call('shell','input','keyevent','4');time.sleep(1)
+            elif kind in ('tap_text','tap_description'):
                 root,raw=ui();needle=step['text'];attribute='content-desc' if kind=='tap_description' else 'text';nodes=[n for n in root.iter('node') if (n.get(attribute,'')==needle if step.get('exact') else needle in n.get(attribute,''))]
                 if not check(name+'_selector',bool(nodes)):raise RuntimeError('UI_SELECTOR_UNRESOLVED_CHECK_SCROLL_OR_SCENARIO')
                 bounds=re.fullmatch(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]',nodes[0].get('bounds',''))
