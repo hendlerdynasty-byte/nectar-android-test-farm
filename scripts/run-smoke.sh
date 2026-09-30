@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Smoke-Test: Installation, Kaltstart, Kernnavigation, Absturz-/ANR-Scan.
-set -euo pipefail
+# KEIN set -e: adb liefert bei "nicht vorhanden" Exit 1 zurueck
+# (z.B. Package-Manager noch nicht bereit, kein Geraet). Mit set -e
+# wuerde das Skript dort abbrechen, statt weiterzulaufen und am
+# Ende sein echtes Ergebnis zu melden. Stattdessen wird jeder
+# relevante Befehl einzeln auf seinen Fehler geprueft.
+set -uo pipefail
 
 : "${ARTIFACT_PATH:?ARTIFACT_PATH fehlt}"
 : "${PACKAGE:?PACKAGE fehlt}"
@@ -88,7 +93,11 @@ log "Rotation geprueft"
 # Achtung: grep -c gibt 0 aus UND liefert Exit 1. Ein "|| echo 0"
 # haengt dann ein zweites 0 an - in $GITHUB_ENV landet dann eine
 # Zeile mit nur "0" und GitHub bricht mit "Invalid format" ab.
-CRASH_COUNT=$(grep -cE "FATAL EXCEPTION|ANR in ${PACKAGE}|am_crash.*${PACKAGE}" \
+  # pipefail ist gesetzt: grep -c liefert bei 0 Treffern Exit 1 und
+  # wuerde ohne Absicherung die Zuweisung abbrechen. "|| true" haelt
+  # die Zeilenzahl intakt.
+  CRASH_COUNT=$( { grep -cE "FATAL EXCEPTION|ANR in ${PACKAGE}|am_crash.*${PACKAGE}" \
+                 "$EV/logcat/full-logcat.txt" 2>/dev/null || true; } | head -1 )
               "$EV/logcat/full-logcat.txt" 2>/dev/null | head -1)
 CRASH_COUNT="${CRASH_COUNT:-0}"
 case "$CRASH_COUNT" in ''|*[!0-9]*) CRASH_COUNT=0 ;; esac
