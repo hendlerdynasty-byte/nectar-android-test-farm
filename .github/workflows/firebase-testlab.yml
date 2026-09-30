@@ -3,6 +3,15 @@ name: firebase-testlab
 # Nur manueller Start. Firebase Test Lab ist der bevorzugte Runtime-Backend:
 # Minuten statt der 20-60 min Software-Emulation. Der Android-Emulator
 # (android-smoke/matrix/release) bleibt Rueckfallebene und Entwicklungsdiagnose.
+#
+# Authentifizierung: GitHub OIDC + Workload Identity Federation — KEIN
+# langlebiger Service-Account-Key. Die Trust-Kette ist dreifach eingeschraenkt:
+#   1. Provider-attributeCondition: nur dieses Repository, nur dieser Workflow,
+#      nur refs/heads/master (keine PRs, keine Forks, keine fremden Repos).
+#   2. SA-Bindung: roles/iam.workloadIdentityUser nur fuer principalSet mit
+#      attribute.repository == hendlerdynasty-byte/nectar-android-test-farm.
+#   3. Rollen des SA: cloudtestservice.testAdmin (Projekt) + storage.objectViewer
+#      (Projekt) — kein Owner/Editor, keine Billing-Rolle.
 on:
   workflow_dispatch:
     inputs:
@@ -47,11 +56,6 @@ on:
         required: true
         type: string
         default: smoke
-      allow_physical:
-        description: 'Release: physisches Gerät zulassen (1/0)'
-        required: false
-        type: string
-        default: '0'
       timeout:
         description: 'Robo-Timeout je Gerät'
         required: false
@@ -64,6 +68,7 @@ concurrency:
 
 permissions:
   contents: read
+  id-token: write   # für Workload Identity Federation (GitHub OIDC)
 
 env:
   REQUEST_ID: ${{ inputs.request_id }}
@@ -75,7 +80,7 @@ env:
   VERSION_NAME: ${{ inputs.version_name }}
   VERSION_CODE: ${{ inputs.version_code }}
   MODE: ${{ inputs.mode }}
-  ALLOW_PHYSICAL: ${{ inputs.allow_physical }}
+  ALLOW_PHYSICAL: '0'
   TL_TIMEOUT: ${{ inputs.timeout }}
   FIREBASE_PROJECT: nectar-android-testlab-01
 
@@ -98,17 +103,16 @@ jobs:
           BUILD_ID: ${{ inputs.build_id }}
         run: ./scripts/fetch-artifact.sh
 
-      - name: gcloud mit Test-Lab-Dienstaccount authentifizieren
-        env:
-          FIREBASE_TESTLAB_SA: ${{ secrets.FIREBASE_TESTLAB_SA }}
+      - name: Google-Auth via Workload Identity Federation (kurzlebig, kein Key)
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: 'projects/205243761015/locations/global/workloadIdentityPools/github-farm-pool/providers/github-farm-provider'
+          service_account: 'nectar-testlab-ci@nectar-android-testlab-01.iam.gserviceaccount.com'
+
+      - name: Identität protokollieren (ohne Secrets)
         run: |
-          # Key wird nie ausgegeben und sofort nach der Aktivierung geloescht.
-          KEY_FILE="$RUNNER_TEMP/testlab-sa.json"
-          printf '%s' "$FIREBASE_TESTLAB_SA" > "$KEY_FILE"
-          gcloud auth activate-service-account --key-file="$KEY_FILE"
-          rm -f "$KEY_FILE"
-          gcloud config set project "${FIREBASE_PROJECT:-nectar-android-testlab-01}"
-          gcloud auth list
+          gcloud config get-value account
+          gcloud config set project "${FIREBASE_PROJECT}"
 
       - name: Test Lab Matrix starten, warten, Belege holen
         run: |
@@ -136,3 +140,29 @@ jobs:
             echo ""
             cat "$RUNNER_TEMP/nectar-evidence/SUMMARY.md" 2>/dev/null || echo "(keine Zusammenfassung)"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # FAIL-CLOSED: Der Workflow ist GRÜN nur bei kanonischem PASS.
+      # FAIL / INFRA_FAIL / ZERO_COST_BLOCKED / WAITING_FOR_NO_COST_QUOTA
+      # werden alle als Job-Fehler geführt — kontrolliert, ohne Quota-
+      # Umgehung und ohne automatische Wiederholung über das Limit hinaus
+      # (die Retry-Policy liegt im Runner-Skript, max. 1 INFRA-Retry).
+      - name: Kanonisches Urteil erzwingen (fail closed)
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          path = os.path.join(os.environ["RUNNER_TEMP"], "nectar-evidence", "result.json")
+          verdict = None
+          try:
+              with open(path, encoding="utf-8") as fh:
+                  verdict = json.load(fh).get("verdict")
+          except Exception as e:
+              print(f"Kein lesbares result.json ({e}) — gilt als INFRA_FAIL.")
+              sys.exit(1)
+          print(f"Kanonisches Verdikt: {verdict}")
+          if verdict == "PASS":
+              sys.exit(0)
+          if verdict == "WAITING_FOR_NO_COST_QUOTA":
+              print("Kontrollierter Nicht-PASS: kostenlose Quote erschöpft — keine kostenpflichtige Ausführung, kein Fallback.")
+          sys.exit(1)
+          PY
