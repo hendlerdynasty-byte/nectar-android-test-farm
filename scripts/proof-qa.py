@@ -58,11 +58,19 @@ def main(work):
         for ordinal,step in enumerate(steps):
             kind=step.get('kind');name='flow_'+str(ordinal)+'_'+str(kind)
             if kind=='tap_text':
-                root,raw=ui();needle=step['text'];nodes=[n for n in root.iter('node') if needle in n.get('text','')]
+                root,raw=ui();needle=step['text'];nodes=[n for n in root.iter('node') if (n.get('text','')==needle if step.get('exact') else needle in n.get('text',''))]
                 if not check(name+'_selector',bool(nodes)):raise RuntimeError('UI_SELECTOR_UNRESOLVED_CHECK_SCROLL_OR_SCENARIO')
                 bounds=re.fullmatch(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]',nodes[0].get('bounds',''))
                 if not bounds:raise RuntimeError('INVALID_UI_BOUNDS_INFRA')
                 x1,y1,x2,y2=map(int,bounds.groups());p=call('shell','input','tap',str((x1+x2)//2),str((y1+y2)//2));check(name,p.returncode==0);time.sleep(1)
+            elif kind in ('scroll_forward','scroll_backward'):
+                root,raw=ui();nodes=[n for n in root.iter('node') if n.get('scrollable')=='true']
+                if not nodes:raise RuntimeError('NO_SCROLL_CONTAINER_INFRA')
+                bounds=re.fullmatch(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]',nodes[0].get('bounds',''))
+                if not bounds:raise RuntimeError('INVALID_SCROLL_BOUNDS_INFRA')
+                x1,y1,x2,y2=map(int,bounds.groups());x=(x1+x2)//2;a=y1+(y2-y1)*8//10;b=y1+(y2-y1)*2//10
+                if kind=='scroll_backward':a,b=b,a
+                p=call('shell','input','swipe',str(x),str(a),str(x),str(b),'400');check(name,p.returncode==0);time.sleep(1)
             elif kind=='expect_text':
                 root,raw=ui();check(name,any(step['text'] in n.get('text','') for n in root.iter('node')))
             elif kind=='expect_absent':
