@@ -274,16 +274,21 @@ while True:
                         "--timeout", TL_TIMEOUT, "--results-dir", results_dir, "--async"],
                        capture_output=True, text=True)
     if r.returncode != 0:
-        err = r.stderr[:800]
-        if re.search(r"quota|exceeded", err, re.I):
-            fail("WAITING_FOR_NO_COST_QUOTA", [err[:200]])
-        if re.search(r"billing|payment", err, re.I):
-            fail("ZERO_COST_BLOCKED", [err[:200]])
+        err_full = (r.stderr or "") + ("\n" + r.stdout if r.stdout else "")
+        with open(os.path.join(EV, f"launch-error-attempt{attempt}.txt"), "w") as fh:
+            fh.write(err_full)
+        # aussagekräftigste Zeile für den Blocker (keine harmlosen Support-Links)
+        m_err = re.search(r"ERROR:\s*(.+)", err_full)
+        err = (m_err.group(1).strip() if m_err else err_full.strip())[:200]
+        if re.search(r"quota|exceeded", err_full, re.I):
+            fail("WAITING_FOR_NO_COST_QUOTA", [err])
+        if re.search(r"billing|payment", err_full, re.I):
+            fail("ZERO_COST_BLOCKED", [err])
         if attempt <= MAX_INFRA_RETRIES and quota_allows(need_virtual, need_physical):
-            log(f"Launch-Fehler (INFRA) — genau ein Retry: {err[:200]}")
+            log(f"Launch-Fehler (INFRA) — genau ein Retry: {err}")
             time.sleep(20)
             continue
-        fail("INFRA_FAIL", [f"Launch fehlgeschlagen: {err[:200]}"], attempts=attempt)
+        fail("INFRA_FAIL", [f"Launch fehlgeschlagen (Exit {r.returncode}): {err}"], attempts=attempt)
 
     hid_m = re.search(r"histories/(bh\.[a-z0-9]+)", r.stdout)
     if not hid_m:
