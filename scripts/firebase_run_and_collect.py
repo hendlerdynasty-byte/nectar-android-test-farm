@@ -271,79 +271,159 @@ attempt = 0
 launched_matrices = []
 while True:
     attempt += 1
-    launch_ts = int(time.time()) - 120
     results_dir = f"farm-{APP_ID}-{MODE}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     log(f"Starte Matrix (Versuch {attempt}, {len(devices)} Geräte, Robo, Timeout {TL_TIMEOUT})")
-    r = subprocess.run(["gcloud", "firebase", "test", "android", "run", "--project", PROJECT,
-                        "--type", "robo", "--app", APP_GCS_PATH or ARTIFACT, *dev_args,
-                        "--timeout", TL_TIMEOUT, "--results-dir", results_dir, "--async"],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        err_full = (r.stderr or "") + ("\n" + r.stdout if r.stdout else "")
-        with open(os.path.join(EV, f"launch-error-attempt{attempt}.txt"), "w") as fh:
+
+    if APP_GCS_PATH:
+        # Direkter REST-Launch: der gcloud-CLI lädt das APK selbst in den
+        # verwalteten Bucket hoch — dort hat der CI-SA (WIF, keine
+        # Editor-Rolle) kein Schreibrecht. Die TestMatrix-API akzeptiert das
+        # APK dagegen als appApk.gcsPath; Test Lab selbst liest es.
+        timeout_s = str(int(re.sub(r"[^0-9]", "", TL_TIMEOUT) or 120))
+        payload = {
+            "testSpecification": {
+                "testTimeout": f"{timeout_s}s",
+                "androidRoboTest": {
+                    "appApk": {"gcsPath": APP_GCS_PATH},
+                    "appPackageId": PACKAGE,
+                },
+            },
+            "environmentMatrix": {
+                "androidDeviceList": {
+                    "androidDevices": [
+                        {"androidModelId": m, "androidVersionId": str(v),
+                         "locale": "de", "orientation": "portrait"}
+                        for m, v, _f in devices
+                    ]
+                }
+            },
+            "resultStorage": {
+                "googleCloudStorage": {
+                    "gcsPath": f"gs://test-lab-pi55ivicyy7m2-k1q3mqsdtfntx/{results_dir}/"
+                }
+            },
+            "flakyTestAttempts": 0,
+        }
+        r = subprocess.run(
+            ["curl", "-sS", "-X", "POST",
+             "-H", f"Authorization: Bearer {token()}", "-H", "Content-Type: application/json",
+             f"https://testing.googleapis.com/v1/projects/{PROJECT}/testMatrices",
+             "-d", json.dumps(payload)],
+            capture_output=True, text=True)
+        try:
+            launch = json.loads(r.stdout)
+        except Exception:
+            launch = {}
+        if launch.get("testMatrixId"):
+            mid = launch["testMatrixId"]
+            log(f"Matrix: {mid}")
+            launched_matrices.append(mid)
+            final = {}
+            for i in range(120):  # max 30 min
+                final = curl_api(f"https://testing.googleapis.com/v1/projects/{PROJECT}/testMatrices/{mid}")
+                st = final.get("state", "")
+                if st in ("FINISHED", "ERROR", "INVALID", "CANCELLED"):
+                    break
+                if i % 8 == 0:
+                    log(f"  Zustand {st} ({i * 15}s)")
+                time.sleep(15)
+            mstate = final.get("state", "")
+            json.dump(final, open(os.path.join(EV, f"matrix-attempt{attempt}.json"), "w"),
+                      ensure_ascii=False, indent=2)
+            if mstate == "FINISHED":
+                break
+            if attempt <= MAX_INFRA_RETRIES and quota_allows(need_virtual, need_physical):
+                log(f"Matrix endete in {mstate or 'TIMEOUT'} (INFRA) — genau ein Retry")
+                time.sleep(20)
+                continue
+            fail("INFRA_FAIL", [f"Matrix-Endzustand: {mstate or 'TIMEOUT'} (nach {attempt} Versuch(en))"],
+                 attempts=attempt, launched_matrices=launched_matrices)
+        err_full = json.dumps(launch, ensure_ascii=False)
+        with open(os.path.join(EV, f"launch-error-attempt{attempt}.json"), "w") as fh:
             fh.write(err_full)
-        # aussagekräftigste Zeile für den Blocker (keine harmlosen Support-Links)
-        m_err = re.search(r"ERROR:\s*(.+)", err_full)
-        err = (m_err.group(1).strip() if m_err else err_full.strip())[:200]
+        err = ((launch.get("error", {}) or {}).get("message") or err_full)[:200]
         if re.search(r"quota|exceeded", err_full, re.I):
-            fail("WAITING_FOR_NO_COST_QUOTA", [err])
+            fail("WAITING_FOR_NO_COST_QUOTA", [err], attempts=attempt)
         if re.search(r"billing|payment", err_full, re.I):
-            fail("ZERO_COST_BLOCKED", [err])
+            fail("ZERO_COST_BLOCKED", [err], attempts=attempt)
         if attempt <= MAX_INFRA_RETRIES and quota_allows(need_virtual, need_physical):
             log(f"Launch-Fehler (INFRA) — genau ein Retry: {err}")
             time.sleep(20)
             continue
-        fail("INFRA_FAIL", [f"Launch fehlgeschlagen (Exit {r.returncode}): {err}"], attempts=attempt)
+        fail("INFRA_FAIL", [f"Launch fehlgeschlagen: {err}"], attempts=attempt)
+    else:
+        # Kein GCS-Pfad: klassischer CLI-Launch (lokale Identität mit
+        # Schreibrecht, z. B. der Skill auf dem Mac).
+        launch_ts = int(time.time()) - 120
+        r = subprocess.run(["gcloud", "firebase", "test", "android", "run", "--project", PROJECT,
+                            "--type", "robo", "--app", ARTIFACT, *dev_args,
+                            "--timeout", TL_TIMEOUT, "--results-dir", results_dir, "--async"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            err_full = (r.stderr or "") + ("\n" + r.stdout if r.stdout else "")
+            with open(os.path.join(EV, f"launch-error-attempt{attempt}.txt"), "w") as fh:
+                fh.write(err_full)
+            m_err = re.search(r"ERROR:\s*(.+)", err_full)
+            err = (m_err.group(1).strip() if m_err else err_full.strip())[:200]
+            if re.search(r"quota|exceeded", err_full, re.I):
+                fail("WAITING_FOR_NO_COST_QUOTA", [err])
+            if re.search(r"billing|payment", err_full, re.I):
+                fail("ZERO_COST_BLOCKED", [err])
+            if attempt <= MAX_INFRA_RETRIES and quota_allows(need_virtual, need_physical):
+                log(f"Launch-Fehler (INFRA) — genau ein Retry: {err}")
+                time.sleep(20)
+                continue
+            fail("INFRA_FAIL", [f"Launch fehlgeschlagen (Exit {r.returncode}): {err}"], attempts=attempt)
 
-    hid_m = re.search(r"histories/(bh\.[a-z0-9]+)", r.stdout)
-    if not hid_m:
+        hid_m = re.search(r"histories/(bh\.[a-z0-9]+)", r.stdout)
+        if not hid_m:
+            if attempt <= MAX_INFRA_RETRIES and quota_allows(need_virtual, need_physical):
+                log("Keine History-ID in der Launch-Antwort — genau ein Retry")
+                time.sleep(20)
+                continue
+            fail("INFRA_FAIL", ["keine History-ID in der Launch-Antwort"], attempts=attempt)
+        hid = hid_m.group(1)
+
+        mid = None
+        for _ in range(20):
+            data = curl_api(f"https://toolresults.googleapis.com/toolresults/v1beta3/projects/{PROJECT}/histories/{hid}/executions?pageSize=50")
+            ids = sorted({e["testExecutionMatrixId"] for e in data.get("executions", [])
+                          if int(e.get("creationTime", {}).get("seconds", "0")) >= launch_ts
+                          and e.get("testExecutionMatrixId", "").startswith("matrix-")})
+            if ids:
+                mid = ids[0]
+                break
+            time.sleep(10)
+        if not mid:
+            if attempt <= MAX_INFRA_RETRIES and quota_allows(need_virtual, need_physical):
+                log("API-Matrix-ID nicht ermittelbar — genau ein Retry")
+                time.sleep(20)
+                continue
+            fail("INFRA_FAIL", ["API-Matrix-ID nicht ermittelbar"], attempts=attempt)
+        log(f"Matrix: {mid}")
+        launched_matrices.append(mid)
+
+        final = {}
+        for i in range(120):  # max 30 min
+            final = curl_api(f"https://testing.googleapis.com/v1/projects/{PROJECT}/testMatrices/{mid}")
+            st = final.get("state", "")
+            if st in ("FINISHED", "ERROR", "INVALID", "CANCELLED"):
+                break
+            if i % 8 == 0:
+                log(f"  Zustand {st} ({i * 15}s)")
+            time.sleep(15)
+        mstate = final.get("state", "")
+        json.dump(final, open(os.path.join(EV, f"matrix-attempt{attempt}.json"), "w"),
+                  ensure_ascii=False, indent=2)
+
+        if mstate == "FINISHED":
+            break
         if attempt <= MAX_INFRA_RETRIES and quota_allows(need_virtual, need_physical):
-            log("Keine History-ID in der Launch-Antwort — genau ein Retry")
+            log(f"Matrix endete in {mstate or 'TIMEOUT'} (INFRA) — genau ein Retry")
             time.sleep(20)
             continue
-        fail("INFRA_FAIL", ["keine History-ID in der Launch-Antwort"], attempts=attempt)
-    hid = hid_m.group(1)
-
-    mid = None
-    for _ in range(20):
-        data = curl_api(f"https://toolresults.googleapis.com/toolresults/v1beta3/projects/{PROJECT}/histories/{hid}/executions?pageSize=50")
-        ids = sorted({e["testExecutionMatrixId"] for e in data.get("executions", [])
-                      if int(e.get("creationTime", {}).get("seconds", "0")) >= launch_ts
-                      and e.get("testExecutionMatrixId", "").startswith("matrix-")})
-        if ids:
-            mid = ids[0]
-            break
-        time.sleep(10)
-    if not mid:
-        if attempt <= MAX_INFRA_RETRIES and quota_allows(need_virtual, need_physical):
-            log("API-Matrix-ID nicht ermittelbar — genau ein Retry")
-            time.sleep(20)
-            continue
-        fail("INFRA_FAIL", ["API-Matrix-ID nicht ermittelbar"], attempts=attempt)
-    log(f"Matrix: {mid}")
-    launched_matrices.append(mid)
-
-    final = {}
-    for i in range(120):  # max 30 min
-        final = curl_api(f"https://testing.googleapis.com/v1/projects/{PROJECT}/testMatrices/{mid}")
-        st = final.get("state", "")
-        if st in ("FINISHED", "ERROR", "INVALID", "CANCELLED"):
-            break
-        if i % 8 == 0:
-            log(f"  Zustand {st} ({i * 15}s)")
-        time.sleep(15)
-    mstate = final.get("state", "")
-    json.dump(final, open(os.path.join(EV, f"matrix-attempt{attempt}.json"), "w"),
-              ensure_ascii=False, indent=2)
-
-    if mstate == "FINISHED":
-        break
-    if attempt <= MAX_INFRA_RETRIES and quota_allows(need_virtual, need_physical):
-        log(f"Matrix endete in {mstate or 'TIMEOUT'} (INFRA) — genau ein Retry")
-        time.sleep(20)
-        continue
-    fail("INFRA_FAIL", [f"Matrix-Endzustand: {mstate or 'TIMEOUT'} (nach {attempt} Versuch(en))"],
-         attempts=attempt, launched_matrices=launched_matrices)
+        fail("INFRA_FAIL", [f"Matrix-Endzustand: {mstate or 'TIMEOUT'} (nach {attempt} Versuch(en))"],
+             attempts=attempt, launched_matrices=launched_matrices)
 
 finished_utc = now_iso()
 log(f"Endzustand: {mstate}")
