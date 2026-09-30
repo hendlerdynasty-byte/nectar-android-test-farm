@@ -135,6 +135,9 @@ jobs:
           elif [ "${SCREEN_STATE:-unknown}" = "blank" ]; then
             VERDICT=FAIL
             BL="Screenshot ist leer - App hat nichts angezeigt"
+          elif [ "${SCREEN_STATE:-missing}" = "missing" ] || [ "${SHOT_OK:-0}" != "1" ]; then
+            VERDICT=FAIL
+            BL="Screenshot fehlt - kein Beleg fuer die Anzeige"
           else
             VERDICT=PASS
           fi

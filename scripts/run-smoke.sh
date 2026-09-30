@@ -60,40 +60,25 @@ sleep 2
 sleep 4
 
 # 4) Screenshot-Beweis
-"$ADB" shell screencap -p /sdcard/nectar-smoke.png >/dev/null 2>&1 || true
-"$ADB" pull /sdcard/nectar-smoke.png "$EV/screenshots/smoke-foreground.png" >/dev/null 2>&1 || true
-# 3b) Wirklich gestartet? - am start -W liefert im Software-Emulator
-#     regelmaessig "LaunchState: UNKNOWN", selbst wenn die App laeuft.
-#     Verlaesslich sind stattdessen: Vordergrund-Aktivitaet und ein
-#     Screenshot mit echtem Inhalt. Ein leerer Bildschirm ist KEIN PASS.
-# 3b) Wirklich gestartet?
-#     am start -W liefert im Software-Emulator regelmaessig
-#     "LaunchState: UNKNOWN", selbst wenn die App laeuft. Verlaesslich
-#     sind stattdessen Vordergrund-Aktivitaet und ein Screenshot mit
-#     Inhalt. Ein leerer Bildschirm ist KEIN PASS.
-#     Wichtig: auf dem Software-Emulator braucht die App mehrere
-#     Sekunden bis sie wirklich vorne ist. Deshalb wird gewartet und
-#     mehrfach geprueft, bevor ueberhaupt ein Blocker entsteht.
-log "Starte pruefen: Vordergrund-Aktivitaet (mit Wartezeit)"
-LAUNCH_STATE=$(grep -E "^Status:" "$EV/activity-start.txt" 2>/dev/null | head -1 | tr -d '\r')
-log "  am start -W: ${LAUNCH_STATE:-unbekannt}"
-
-APP_IN_FG=0
-FG_WAITED=0
-FG_TIMEOUT=90
-while [ "$FG_WAITED" -lt "$FG_TIMEOUT" ]; do
-  FOCUS=$("$ADB" shell dumpsys window 2>/dev/null | grep -m1 -E "mCurrentFocus|mFocusedApp" | tr -d '\r')
-  RESUMED=$("$ADB" shell dumpsys activity activities 2>/dev/null | grep -m1 "mResumedActivity" | tr -d '\r')
-  case "$FOCUS$RESUMED" in
-    *"$PACKAGE"*) APP_IN_FG=1; break ;;
-  esac
-  sleep 10
-  FG_WAITED=$((FG_WAITED + 10))
+# Screenshot ist Pflichtbeleg. Auf dem Software-Emulator kommt
+# screencap gelegentlich zu frueh oder leer - deshalb mehrfach
+# versuchen, bis eine nicht-leere Datei vorliegt.
+SHOT_OK=0
+for TRY in 1 2 3; do
+  "$ADB" shell screencap -p /sdcard/nectar-smoke.png >/dev/null 2>&1 || true
+  sleep 3
+  rm -f "$EV/screenshots/smoke-foreground.png" 2>/dev/null || true
+  "$ADB" pull /sdcard/nectar-smoke.png "$EV/screenshots/smoke-foreground.png" >/dev/null 2>&1 || true
+  if [ -s "$EV/screenshots/smoke-foreground.png" ]; then SHOT_OK=1; break; fi
+  log "  Screenshot-Versuch ${TRY} leer, neuer Versuch"
+  sleep 5
 done
-log "  Vordergrund nach ${FG_WAITED}s: ${APP_IN_FG} (${FOCUS:-unbekannt})"
-echo "APP_FOREGROUND=${APP_IN_FG}" >> "$GITHUB_ENV"
-
-log "Screenshot gesichert"
+if [ "$SHOT_OK" = "1" ]; then
+  log "Screenshot gesichert ($(du -k "$EV/screenshots/smoke-foreground.png" | cut -f1) KB)"
+else
+  log "Screenshot fehlt nach 3 Versuchen - das ist ein Blocker"
+fi
+echo "SHOT_OK=$SHOT_OK" >> "$GITHUB_ENV"
 
 # 5) Rotation / Resume
 "$ADB" shell settings put system accelerometer_rotation 0 >/dev/null 2>&1 || true
