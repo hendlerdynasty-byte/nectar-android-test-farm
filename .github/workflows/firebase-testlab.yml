@@ -1,0 +1,138 @@
+name: firebase-testlab
+
+# Nur manueller Start. Firebase Test Lab ist der bevorzugte Runtime-Backend:
+# Minuten statt der 20-60 min Software-Emulation. Der Android-Emulator
+# (android-smoke/matrix/release) bleibt Rueckfallebene und Entwicklungsdiagnose.
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: 'UUID der Anfrage'
+        required: true
+        type: string
+      app:
+        description: 'Kanonische App-Kennung'
+        required: true
+        type: string
+      package:
+        description: 'Android-Paketname'
+        required: true
+        type: string
+      build_id:
+        description: 'Opake UUID des Artefakts auf der privaten Bridge'
+        required: true
+        type: string
+      commit_sha:
+        description: 'Commit-SHA des privaten App-Repositorys'
+        required: true
+        type: string
+      artifact_name:
+        description: 'Dateiname des Artefakts'
+        required: true
+        type: string
+      artifact_sha256:
+        description: 'Erwartete SHA256-Pruefsumme (fail closed)'
+        required: false
+        type: string
+      version_name:
+        description: 'Versionsname'
+        required: false
+        type: string
+      version_code:
+        description: 'Versionscode'
+        required: false
+        type: string
+      mode:
+        description: 'Testmodus'
+        required: true
+        type: string
+        default: smoke
+      allow_physical:
+        description: 'Release: physisches Gerät zulassen (1/0)'
+        required: false
+        type: string
+        default: '0'
+      timeout:
+        description: 'Robo-Timeout je Gerät'
+        required: false
+        type: string
+        default: '2m'
+
+concurrency:
+  group: testlab-${{ inputs.app }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REQUEST_ID: ${{ inputs.request_id }}
+  APP_ID: ${{ inputs.app }}
+  PACKAGE: ${{ inputs.package }}
+  COMMIT_SHA: ${{ inputs.commit_sha }}
+  ARTIFACT_NAME: ${{ inputs.artifact_name }}
+  ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
+  VERSION_NAME: ${{ inputs.version_name }}
+  VERSION_CODE: ${{ inputs.version_code }}
+  MODE: ${{ inputs.mode }}
+  ALLOW_PHYSICAL: ${{ inputs.allow_physical }}
+  TL_TIMEOUT: ${{ inputs.timeout }}
+  FIREBASE_PROJECT: nectar-android-testlab-01
+
+jobs:
+  testlab:
+    name: Test Lab (${{ inputs.mode }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Artefakt von der privaten Bridge holen
+        env:
+          BRIDGE_URL: ${{ secrets.BRIDGE_URL }}
+          BRIDGE_TOKEN: ${{ secrets.BRIDGE_TOKEN }}
+          BUILD_ID: ${{ inputs.build_id }}
+        run: ./scripts/fetch-artifact.sh
+
+      - name: gcloud mit Test-Lab-Dienstaccount authentifizieren
+        env:
+          FIREBASE_TESTLAB_SA: ${{ secrets.FIREBASE_TESTLAB_SA }}
+        run: |
+          # Key wird nie ausgegeben und sofort nach der Aktivierung geloescht.
+          KEY_FILE="$RUNNER_TEMP/testlab-sa.json"
+          printf '%s' "$FIREBASE_TESTLAB_SA" > "$KEY_FILE"
+          gcloud auth activate-service-account --key-file="$KEY_FILE"
+          rm -f "$KEY_FILE"
+          gcloud config set project "${FIREBASE_PROJECT:-nectar-android-testlab-01}"
+          gcloud auth list
+
+      - name: Test Lab Matrix starten, warten, Belege holen
+        run: |
+          # ARTIFACT_PATH und ARTIFACT_SHA256 kommen aus fetch-artifact.sh
+          # (nachgerechnete Pruefsumme, fail closed im Runner-Skript).
+          export ARTIFACT="${ARTIFACT_PATH:?Artefakt wurde nicht geladen}"
+          export RESULTS_ROOT="$RUNNER_TEMP/nectar-evidence"
+          export RESULTS_DIR_NAME="nectar-testlab-${APP_ID}-${MODE}-${REQUEST_ID}"
+          python3 scripts/firebase_run_and_collect.py
+
+      - name: Ergebnis als Beleg sichern
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nectar-result-${{ inputs.app }}-${{ inputs.request_id }}
+          path: ${{ runner.temp }}/nectar-evidence
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Ergebnis in die Zusammenfassung
+        if: always()
+        run: |
+          {
+            echo "### Test Lab: $APP_ID ($MODE)"
+            echo ""
+            cat "$RUNNER_TEMP/nectar-evidence/SUMMARY.md" 2>/dev/null || echo "(keine Zusammenfassung)"
+          } >> "$GITHUB_STEP_SUMMARY"
