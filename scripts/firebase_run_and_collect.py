@@ -48,6 +48,11 @@ VERSION_NAME = os.environ.get("VERSION_NAME", "")
 VERSION_CODE = os.environ.get("VERSION_CODE", "0")
 ARTIFACT = os.environ.get("ARTIFACT", "")
 ART_SHA = os.environ.get("ARTIFACT_SHA256", "")
+# Optional: bereits in den Test-Lab-Eimer gelegtes APK (gs://…).
+# Nötig für CI-Identitäten ohne Schreibrecht auf den verwalteten Bucket
+# (storage.objects.create dort ist projekt-Team-gebunden: nur Owner/Editor).
+# Die Identity-Bindung bleibt über die Bridge + SHA-256 fail-closed erhalten.
+APP_GCS_PATH = os.environ.get("APP_GCS_PATH", "")
 RESULTS_ROOT = os.environ.get("RESULTS_ROOT", os.path.join(os.environ.get("RUNNER_TEMP", "/tmp"), "nectar-evidence"))
 RESULTS_DIR_NAME = os.environ.get("RESULTS_DIR_NAME", f"testlab-{int(time.time())}")
 TL_TIMEOUT = os.environ.get("TL_TIMEOUT", "2m")
@@ -270,7 +275,7 @@ while True:
     results_dir = f"farm-{APP_ID}-{MODE}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     log(f"Starte Matrix (Versuch {attempt}, {len(devices)} Geräte, Robo, Timeout {TL_TIMEOUT})")
     r = subprocess.run(["gcloud", "firebase", "test", "android", "run", "--project", PROJECT,
-                        "--type", "robo", "--app", ARTIFACT, *dev_args,
+                        "--type", "robo", "--app", APP_GCS_PATH or ARTIFACT, *dev_args,
                         "--timeout", TL_TIMEOUT, "--results-dir", results_dir, "--async"],
                        capture_output=True, text=True)
     if r.returncode != 0:

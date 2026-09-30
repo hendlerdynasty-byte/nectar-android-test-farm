@@ -39,6 +39,10 @@ on:
         description: 'Dateiname des Artefakts'
         required: true
         type: string
+      app_gcs_path:
+        description: 'Optional: gs://-Pfad des APKs im Test-Lab-Eimer (für CI-Identitäten ohne Schreibzugriff). Identity-Bindung bleibt über Bridge + SHA-256.'
+        required: false
+        type: string
       artifact_sha256:
         description: 'Erwartete SHA256-Pruefsumme (fail closed)'
         required: false
@@ -122,6 +126,7 @@ jobs:
           # ARTIFACT_PATH und ARTIFACT_SHA256 kommen aus fetch-artifact.sh
           # (nachgerechnete Pruefsumme, fail closed im Runner-Skript).
           export ARTIFACT="${ARTIFACT_PATH:?Artefakt wurde nicht geladen}"
+          export APP_GCS_PATH="${{ inputs.app_gcs_path }}"
           export RESULTS_ROOT="$RUNNER_TEMP/nectar-evidence"
           export RESULTS_DIR_NAME="nectar-testlab-${APP_ID}-${MODE}-${REQUEST_ID}"
           python3 scripts/firebase_run_and_collect.py
