@@ -127,10 +127,11 @@ jobs:
           MATRIX_JSON='[{"api":"${{ matrix.api }}","label":"${{ matrix.label }}","tag":"google_apis","arch":"x86_64","acceleration":"software"}]'
           export MATRIX_JSON
           if [ "${CRASH_COUNT:-0}" -gt 0 ] || [ "${TESTS_FAILED:-0}" -gt 0 ]; then
-            echo "VERDICT=FAIL" >> "$GITHUB_ENV"
+            VERDICT=FAIL
           else
-            echo "VERDICT=PASS" >> "$GITHUB_ENV"
+            VERDICT=PASS
           fi
+          export VERDICT
           ./scripts/normalize-result.sh
 
       - name: Ergebnis-Beleg

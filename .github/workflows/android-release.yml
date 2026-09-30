@@ -148,10 +148,11 @@ jobs:
           [ "${RESUME_OK:-0}" = "0" ] && BLOCKERS="$BLOCKERS;Zustandswiederherstellung fehlgeschlagen"
           export BLOCKERS
           if [ "${CRASH_COUNT:-0}" -gt 0 ] || [ -n "${BLOCKERS}" ]; then
-            echo "VERDICT=FAIL" >> "$GITHUB_ENV"
+            VERDICT=FAIL
           else
-            echo "VERDICT=PASS" >> "$GITHUB_ENV"
+            VERDICT=PASS
           fi
+          export VERDICT
           ./scripts/normalize-result.sh
 
       - name: Beleg sichern

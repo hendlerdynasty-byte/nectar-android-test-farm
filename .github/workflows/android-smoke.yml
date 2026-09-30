@@ -123,10 +123,11 @@ jobs:
           MATRIX_JSON: '[{"api":"${{ inputs.target_api }}","tag":"google_apis","arch":"x86_64","acceleration":"software"}]'
         run: |
           if [ "${CRASH_COUNT:-0}" -gt 0 ]; then
-            echo "VERDICT=FAIL" >> "$GITHUB_ENV"
+            VERDICT=FAIL
           else
-            echo "VERDICT=PASS" >> "$GITHUB_ENV"
+            VERDICT=PASS
           fi
+          export VERDICT
           ./scripts/normalize-result.sh
 
       - name: Ergebnis als Beleg sichern
