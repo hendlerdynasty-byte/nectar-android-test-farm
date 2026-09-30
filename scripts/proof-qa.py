@@ -52,12 +52,14 @@ def main(work):
             except ET.ParseError:raise RuntimeError('INVALID_UI_TREE_INFRA')
             return root,raw
         steps=q.get('ui_steps',[])
+        if steps:
+            call('shell','settings','put','system','user_rotation','0');time.sleep(2)
         if len(steps)>40:raise RuntimeError('TOO_MANY_UI_STEPS')
         for ordinal,step in enumerate(steps):
             kind=step.get('kind');name='flow_'+str(ordinal)+'_'+str(kind)
             if kind=='tap_text':
                 root,raw=ui();needle=step['text'];nodes=[n for n in root.iter('node') if needle in n.get('text','')]
-                if not check(name+'_selector',bool(nodes)):continue
+                if not check(name+'_selector',bool(nodes)):raise RuntimeError('UI_SELECTOR_UNRESOLVED_CHECK_SCROLL_OR_SCENARIO')
                 bounds=re.fullmatch(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]',nodes[0].get('bounds',''))
                 if not bounds:raise RuntimeError('INVALID_UI_BOUNDS_INFRA')
                 x1,y1,x2,y2=map(int,bounds.groups());p=call('shell','input','tap',str((x1+x2)//2),str((y1+y2)//2));check(name,p.returncode==0);time.sleep(1)
