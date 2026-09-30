@@ -6,7 +6,9 @@ yes | sdkmanager --licenses >/dev/null 2>&1 || true
 sdkmanager 'platform-tools' 'emulator' "system-images;android-${TARGET_API};google_apis;x86_64" >/dev/null
 export ANDROID_AVD_HOME="${RUNNER_TEMP}/nectar-avd"
 mkdir -p "$ANDROID_AVD_HOME"
-echo no | avdmanager create avd -n nectar-proof -k "system-images;android-${TARGET_API};google_apis;x86_64" --force >/dev/null
+device_args=()
+if [[ "${TEST_DEVICE_PROFILE:-phone}" == tablet ]]; then device_args=(-d pixel_c); fi
+echo no | avdmanager create avd -n nectar-proof -k "system-images;android-${TARGET_API};google_apis;x86_64" "${device_args[@]}" --force >/dev/null
 accel=(-accel off)
 if [[ -e /dev/kvm ]]; then sudo chmod 666 /dev/kvm; accel=(-accel on); fi
 emulator -avd nectar-proof -no-window -no-audio -no-snapshot -no-boot-anim -gpu swiftshader_indirect "${accel[@]}" >"${RUNNER_TEMP}/emulator-proof.log" 2>&1 &
@@ -20,6 +22,8 @@ done
 deadline=$((SECONDS+120))
 until adb shell service check package 2>/dev/null | grep -q 'found'; do (( SECONDS < deadline )) || exit 23; sleep 3; done
 adb shell input keyevent 82
+adb shell settings put system font_scale "${TEST_FONT_SCALE:-1}"
+adb shell cmd uimode night "${TEST_DARK_MODE:-no}"
 adb shell settings put global window_animation_scale 0
 adb shell settings put global transition_animation_scale 0
 adb shell settings put global animator_duration_scale 0

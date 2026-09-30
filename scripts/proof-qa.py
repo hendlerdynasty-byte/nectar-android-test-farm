@@ -15,7 +15,7 @@ def main(work):
             f=work/(name+'.png');f.write_bytes(p.stdout);result['evidence'].append({'type':'screenshot','path':f.name,'sha256':hashlib.sha256(p.stdout).hexdigest()})
         return check(name,ok)
     try:
-        api=call('shell','getprop','ro.build.version.sdk').stdout.strip();result['matrix']=[{'api':int(api),'arch':'x86_64','runtime':'actual_remote_emulator'}]
+        api=call('shell','getprop','ro.build.version.sdk').stdout.strip();result['matrix']=[{'api':int(api),'arch':'x86_64','runtime':'actual_remote_emulator','device_profile':q.get('device_profile','phone'),'display':call('shell','wm','size').stdout.strip(),'density':call('shell','wm','density').stdout.strip(),'font_scale':call('shell','settings','get','system','font_scale').stdout.strip(),'night_mode':call('shell','cmd','uimode','night').stdout.strip()}]
         if not check('requested_api',int(api)==q['target_api']):raise RuntimeError('DEVICE_API_MISMATCH')
         aapt=next(iter(sorted(Path(sdk).glob('build-tools/*/aapt'))),None)
         if not aapt:raise RuntimeError('AAPT_UNAVAILABLE')

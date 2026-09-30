@@ -29,7 +29,9 @@ def main():
         if not re.fullmatch(r'[0-9a-f]{40}',request['commit_sha']):raise ValueError('BAD_SOURCE_COMMIT')
         receiver=request['return_public_key'].encode();(work/'app.apk').write_bytes(apk);(work/'request.json').write_text(json.dumps(request))
         del apk,plain,payload
-        env=os.environ.copy();env.update({'TARGET_API':str(request['target_api']),'GITHUB_ENV':str(work/'runtime.env')})
+        profile=request.get('device_profile','phone');scale=float(request.get('font_scale',1));dark=request.get('dark_mode',False)
+        if profile not in ('phone','tablet') or not 1<=scale<=2 or not isinstance(dark,bool):raise ValueError('UNSUPPORTED_DEVICE_MATRIX')
+        env=os.environ.copy();env.update({'TARGET_API':str(request['target_api']),'GITHUB_ENV':str(work/'runtime.env'),'TEST_DEVICE_PROFILE':profile,'TEST_FONT_SCALE':str(scale),'TEST_DARK_MODE':'yes' if dark else 'no'})
         p=subprocess.run(['bash','scripts/boot-proof.sh'],env=env,timeout=1400,capture_output=True,text=True)
         (work/'boot.log').write_text(p.stdout+p.stderr)
         if p.returncode:raise RuntimeError('EMULATOR_BOOT_FAILED')
