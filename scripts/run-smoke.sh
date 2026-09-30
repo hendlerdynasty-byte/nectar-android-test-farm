@@ -66,23 +66,32 @@ sleep 4
 #     regelmaessig "LaunchState: UNKNOWN", selbst wenn die App laeuft.
 #     Verlaesslich sind stattdessen: Vordergrund-Aktivitaet und ein
 #     Screenshot mit echtem Inhalt. Ein leerer Bildschirm ist KEIN PASS.
-log "Starte pruefen: Vordergrund-Aktivitaet"
+# 3b) Wirklich gestartet?
+#     am start -W liefert im Software-Emulator regelmaessig
+#     "LaunchState: UNKNOWN", selbst wenn die App laeuft. Verlaesslich
+#     sind stattdessen Vordergrund-Aktivitaet und ein Screenshot mit
+#     Inhalt. Ein leerer Bildschirm ist KEIN PASS.
+#     Wichtig: auf dem Software-Emulator braucht die App mehrere
+#     Sekunden bis sie wirklich vorne ist. Deshalb wird gewartet und
+#     mehrfach geprueft, bevor ueberhaupt ein Blocker entsteht.
+log "Starte pruefen: Vordergrund-Aktivitaet (mit Wartezeit)"
 LAUNCH_STATE=$(grep -E "^Status:" "$EV/activity-start.txt" 2>/dev/null | head -1 | tr -d '\r')
 log "  am start -W: ${LAUNCH_STATE:-unbekannt}"
 
-FOCUS=$("$ADB" shell dumpsys window 2>/dev/null | grep -m1 -E "mCurrentFocus|mFocusedApp" | tr -d '\r')
-RESUMED=$("$ADB" shell dumpsys activity activities 2>/dev/null | grep -m1 "mResumedActivity" | tr -d '\r')
 APP_IN_FG=0
-case "$FOCUS$RESUMED" in
-  *"$PACKAGE"*) APP_IN_FG=1 ;;
-esac
-log "  Vordergrund: ${APP_IN_FG} (${FOCUS:-unbekannt})"
-if [ "$APP_IN_FG" = "1" ]; then
-  echo "APP_FOREGROUND=1" >> "$GITHUB_ENV"
-else
-  echo "APP_FOREGROUND=0" >> "$GITHUB_ENV"
-  log "  WARNUNG: App ist nicht im Vordergrund"
-fi
+FG_WAITED=0
+FG_TIMEOUT=90
+while [ "$FG_WAITED" -lt "$FG_TIMEOUT" ]; do
+  FOCUS=$("$ADB" shell dumpsys window 2>/dev/null | grep -m1 -E "mCurrentFocus|mFocusedApp" | tr -d '\r')
+  RESUMED=$("$ADB" shell dumpsys activity activities 2>/dev/null | grep -m1 "mResumedActivity" | tr -d '\r')
+  case "$FOCUS$RESUMED" in
+    *"$PACKAGE"*) APP_IN_FG=1; break ;;
+  esac
+  sleep 10
+  FG_WAITED=$((FG_WAITED + 10))
+done
+log "  Vordergrund nach ${FG_WAITED}s: ${APP_IN_FG} (${FOCUS:-unbekannt})"
+echo "APP_FOREGROUND=${APP_IN_FG}" >> "$GITHUB_ENV"
 
 log "Screenshot gesichert"
 
