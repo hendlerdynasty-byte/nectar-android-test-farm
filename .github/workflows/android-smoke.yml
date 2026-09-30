@@ -79,6 +79,10 @@ jobs:
     timeout-minutes: 45
 
     steps:
+      - name: Repository auschecken
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Kurzer Kontext protokollieren
         run: |
           echo "app=$APP_ID package=$PACKAGE commit=${COMMIT_SHA:0:12} mode=$MODE"
