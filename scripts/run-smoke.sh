@@ -23,7 +23,7 @@ log "Deinstallation eines vorhandenen Standes"
 "$ADB" uninstall "$PACKAGE" >/dev/null 2>&1 || true
 
 log "Installation"
-INSTALL_OUT=$(adb install -r -g "$ARTIFACT_PATH" 2>&1) || {
+INSTALL_OUT=$("$ADB" install -r -g "$ARTIFACT_PATH" 2>&1) || {
   log "FEHLGESCHLAGEN: Installation"
   echo "$INSTALL_OUT" >&2
   exit 30
