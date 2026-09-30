@@ -60,6 +60,7 @@ def main(work):
             p=call('shell','uiautomator','dump','/sdcard/window.xml',timeout=60)
             if p.returncode:raise RuntimeError('UI_DUMP_INFRA')
             raw=call('shell','cat','/sdcard/window.xml').stdout
+            (work/'current-window.xml').write_text(raw)
             try:root=ET.fromstring(raw)
             except ET.ParseError:raise RuntimeError('INVALID_UI_TREE_INFRA')
             return root,raw
@@ -120,6 +121,8 @@ def main(work):
         result['verdict']='PASS' if all(x['pass'] for x in checks) else 'APP_FAIL'
     except Exception as e:
         result.update(verdict='INFRA_FAIL',infra_failures=1,blockers=[type(e).__name__+':'+str(e)[:180]])
+        try:capture('failure')
+        except Exception:pass
     finally:
         result['tests_passed']=sum(x['pass'] for x in checks);result['tests_failed']=sum(not x['pass'] for x in checks)
         (work/'commands.json').write_text(json.dumps(logs,indent=2));(work/'result.json').write_text(json.dumps(result,indent=2))
