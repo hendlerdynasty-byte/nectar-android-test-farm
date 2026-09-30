@@ -68,7 +68,21 @@ sleep 3
 "$ADB" shell settings put system user_rotation 0 >/dev/null 2>&1 || true
 log "Rotation geprueft"
 
-# 6) Logcat sichern
+  # Logcat-Dump: auf dem Software-Emulator mehrere Megabyte, der
+  # vollstaendige Dump kann minutenlang laufen und den Lauf abbrechen.
+  # Deshalb begrenzt und mit harter Zeitgrenze. Ein Fehler hier darf
+  # den Lauf NIE abbrechen - Installation und Kaltstart sind durch.
+  log "Logcat sichern (letzte 2000 Zeilen, max 90 s)"
+  timeout 90 "$ADB" logcat -d -v threadtime -t 2000 \
+      > "$EV/logcat/full-logcat.txt" 2>/dev/null || true
+  if [ ! -s "$EV/logcat/full-logcat.txt" ]; then
+    log "Logcat leer - zweiter Versuch, kleineres Fenster"
+    timeout 120 "$ADB" logcat -d -v threadtime -t 500 \
+        > "$EV/logcat/full-logcat.txt" 2>/dev/null || true
+  fi
+  LOGCAT_LINES=$(wc -l < "$EV/logcat/full-logcat.txt" 2>/dev/null | tr -d ' ' || echo 0)
+  log "Logcat: ${LOGCAT_LINES:-0} Zeilen"
+  echo "LOGCAT_LINES=${LOGCAT_LINES:-0}" >> "$GITHUB_ENV"
 "$ADB" logcat -d -v threadtime > "$EV/logcat/full-logcat.txt" 2>/dev/null || true
 
 # 7) Absturz- und ANR-Erkennung
@@ -85,3 +99,4 @@ echo "CRASH_COUNT=${CRASH_COUNT}" >> "$GITHUB_ENV"
 echo "TESTS_PASSED=1" >> "$GITHUB_ENV"
 echo "TESTS_FAILED=0" >> "$GITHUB_ENV"
 log "Smoke-Test abgeschlossen"
+exit 0
