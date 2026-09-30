@@ -21,8 +21,7 @@ gh workflow run android-smoke.yml \
   -f app=meine-app -f package=com.beispiel.app \
   -f build_id="<uuid>" -f commit_sha="$(git rev-parse HEAD)" \
   -f artifact_name=app-debug.apk \
-  -f artifact_sha256="$(shasum -a 256 app-debug.apk | awk '{print $1}')" \
-  -f test_activity=com.beispiel.app/.MainActivity
+  -f artifact_sha256="$(shasum -a 256 app-debug.apk | awk '{print $1}')"
 ```
 
 ## Modi
@@ -30,8 +29,8 @@ gh workflow run android-smoke.yml \
 | Modus | Was passiert |
 |---|---|
 | `smoke` | 1 Geraet, aktuelle API, Kaltstart, Absturzscan, Screenshots |
-| `standard` | untere API, aktuelle API, grosses Display, optionale Instrumentation |
-| `release` | Phone, Tablet, Offline-Pfad, Zustandswiederherstellung, Asset-Pruefung |
+| `standard` | minSdk-kompatible untere API, verfuegbare obere API (37 wenn vorhanden), grosses Display; ein Bridge-Download |
+| `release` | AAB-Installation, Phone, Tablet, Offline-Pfad, Prozessneustart, Asset-Pruefung |
 
 ## Ergebnis
 

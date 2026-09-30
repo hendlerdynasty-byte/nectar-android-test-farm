@@ -83,7 +83,11 @@ log "adb:         ${ADB:-FEHLT}"
 [ -n "$ADB" ]        || die "adb nicht gefunden" 29
 
 # ── KVM pruefen ────────────────────────────────────────────────
-if [ -e /dev/kvm ] && [ -r /dev/kvm ]; then
+if [ "$(uname -s)" = Darwin ] && "$EMULATOR" -accel-check 2>&1 | grep -qi 'usable'; then
+  log "macOS Hypervisor-Beschleunigung verfuegbar"
+  ACCEL_FLAG="-accel on"
+  ACCEL_MODE="hardware"
+elif [ -e /dev/kvm ] && [ -r /dev/kvm ]; then
   log "/dev/kvm vorhanden - Hardware-Beschleunigung moeglich"
   ACCEL_FLAG=""
   ACCEL_MODE="hardware"
@@ -219,7 +223,7 @@ RELEASE="$("$ADB" shell getprop ro.build.version.release | tr -d '\r\n ')"
 # liegen NICHT im PATH. Ohne dieses export scheitert jedes
 # nachfolgende Skript mit "command not found".
 for d in "$SDK/platform-tools" "$SDK/emulator" "$SDK/cmdline-tools/latest/bin"; do
-  [ -d "$d" ] && export PATH="$SDK/platform-tools:$SDK/emulator:$SDK/cmdline-tools/latest/bin:$PATH"
+  [ -d "$d" ] && printf '%s\n' "$d" >> "${GITHUB_PATH:?GITHUB_PATH fehlt}"
 done
 log "PATH ergaenzt: $(command -v adb) / $(command -v emulator)"
 

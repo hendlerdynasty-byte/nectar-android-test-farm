@@ -43,14 +43,9 @@ on:
         description: 'Versionscode'
         required: false
         type: string
-      test_activity:
-        description: 'Launcher-Aktivitaet fuer Kaltstart'
-        required: false
-        type: string
       target_api:
         description: 'Android-API-Level'
         required: false
-        default: '34'
         type: string
 
 # GROSSZUGIG - Software-Emulation braucht lange zum Booten.
@@ -88,19 +83,6 @@ jobs:
           echo "app=$APP_ID package=$PACKAGE commit=${COMMIT_SHA:0:12} mode=$MODE"
           echo "Kein Secret, keine URL und kein Artefaktinhalt wird ausgegeben."
 
-      - name: Erwartete Aktivitaet bestimmen
-        id: activity
-        run: |
-          ACT="${{ inputs.test_activity }}"
-          if [ -z "$ACT" ]; then
-            ACT=$(aapt dump badging "$GITHUB_WORKSPACE"/*.apk 2>/dev/null | grep -oE "package: name='[^']+'[^>]*launchable-activity: name='[^']+'" | head -1 | sed -E "s/.*name='([^']+)'.*name='([^']+)'.*/\1\/\2/" || true)
-          fi
-          if [ -z "$ACT" ] || [ "$ACT" = "/" ]; then
-            ACT="${PACKAGE}/.MainActivity"
-          fi
-          echo "activity=$ACT" >> "$GITHUB_OUTPUT"
-          echo "Testaktivitaet: $ACT"
-
       - name: Artefakt von der privaten Bridge holen
         env:
           BRIDGE_URL: ${{ secrets.BRIDGE_URL }}
@@ -108,25 +90,33 @@ jobs:
           BUILD_ID: ${{ inputs.build_id }}
         run: ./scripts/fetch-artifact.sh
 
-      - name: Emulator booten
+      - name: Ziel-API aus Artefakt und Images bestimmen
         env:
-          TARGET_API: ${{ inputs.target_api }}
+          REQUESTED_API: ${{ inputs.target_api }}
+        run: ./scripts/select-target-api.sh
+
+      - name: Emulator booten
         run: ./scripts/boot-emulator.sh
 
       - name: Smoke-Test ausfuehren
-        env:
-          TEST_ACTIVITY: ${{ steps.activity.outputs.activity }}
         run: ./scripts/run-smoke.sh
 
       - name: Ergebnis normalisieren
-        env:
-          MATRIX_JSON: '[{"api":"${{ inputs.target_api }}","tag":"google_apis","arch":"x86_64","acceleration":"software"}]'
+        if: always()
         run: |
           # Verdikt: PASS nur, wenn die App wirklich gelaufen ist.
           # Ohne Vordergrund-Aktivitaet oder mit leerem Screenshot
           # waere das ein PASS ohne Beleg - das ist verboten.
+          MATRIX_JSON="[{\"api\":\"${TARGET_API}\",\"tag\":\"google_apis\",\"arch\":\"x86_64\",\"acceleration\":\"${ACCELERATION:-unknown}\"}]"
+          export MATRIX_JSON
           BL=""
-          if [ "${CRASH_COUNT:-0}" -gt 0 ]; then
+          if [ -z "${DEVICE_API:-}" ]; then
+            VERDICT=INFRA_FAIL
+            BL="Emulator nicht bereit"
+          elif [ "${INSTALL_OK:-0}" != "1" ]; then
+            VERDICT=FAIL
+            BL="APK wurde nicht installiert"
+          elif [ "${CRASH_COUNT:-0}" -gt 0 ]; then
             VERDICT=FAIL
             BL="Absturz oder ANR festgestellt"
           elif [ "${SCREEN_STATE:-unknown}" = "blank" ]; then
@@ -145,6 +135,7 @@ jobs:
           ./scripts/normalize-result.sh
 
       - name: Ergebnis als Beleg sichern
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nectar-result-${{ inputs.app }}-${{ inputs.request_id }}
@@ -153,6 +144,7 @@ jobs:
           if-no-files-found: error
 
       - name: Ergebnis in die Zusammenfassung
+        if: always()
         run: |
           {
             echo "### Smoke: $APP_ID"

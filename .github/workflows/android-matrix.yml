@@ -1,30 +1,19 @@
 name: android-matrix
-
 on:
   workflow_dispatch:
     inputs:
-      request_id:   { description: 'UUID', required: true, type: string }
-      app:          { description: 'App-Kennung', required: true, type: string }
-      package:      { description: 'Paketname', required: true, type: string }
-      build_id:     { description: 'UUID des Artefakts', required: true, type: string }
-      commit_sha:   { description: 'Commit-SHA', required: true, type: string }
-      artifact_name: { description: 'Artefaktname', required: true, type: string }
-      artifact_sha256: { description: 'SHA256', required: false, type: string }
-      version_name: { description: 'Version', required: false, type: string }
-      version_code: { description: 'Versionscode', required: false, type: string }
-      test_activity: { description: 'Launcher-Aktivitaet', required: false, type: string }
-      test_apk_name:
-        description: 'Dateiname des Test-APK (optional, fuer Instrumentation)'
-        required: false
-        type: string
-
+      request_id: { description: 'UUID', required: true, type: string }
+      app: { description: 'App-Kennung', required: true, type: string }
+      package: { description: 'Paketname', required: true, type: string }
+      build_id: { description: 'Einmalige Bridge-UUID', required: true, type: string }
+      commit_sha: { description: 'Commit-SHA', required: true, type: string }
+      artifact_name: { description: 'APK-Dateiname', required: true, type: string }
+      artifact_sha256: { description: 'SHA256', required: true, type: string }
 concurrency:
   group: matrix-${{ inputs.app }}
   cancel-in-progress: false
-
 permissions:
   contents: read
-
 env:
   REQUEST_ID: ${{ inputs.request_id }}
   APP_ID: ${{ inputs.app }}
@@ -32,117 +21,36 @@ env:
   COMMIT_SHA: ${{ inputs.commit_sha }}
   ARTIFACT_NAME: ${{ inputs.artifact_name }}
   ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
-  VERSION_NAME: ${{ inputs.version_name }}
-  VERSION_CODE: ${{ inputs.version_code }}
   MODE: standard
-
 jobs:
   test:
-    name: ${{ matrix.label }} (API ${{ matrix.api }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
-
-    # Bewusst schlank: untere unterstuetzte API, aktuelle API und ein
-    # grosses Display. Kein kartesisches Produkt ohne Evidenz.
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - api: '29'
-            tag: google_apis
-            label: 'untere-API'
-          - api: '34'
-            tag: google_apis
-            label: 'aktuelle-API'
-          - api: '34'
-            tag: google_apis
-            label: 'grosses-Display'
-            dpi: 420
-            resolution: 1440x3120
-
+    timeout-minutes: 180
     steps:
-      - name: Repository auschecken
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-
-      - name: Artefakt holen
+      - name: Privates Artefakt einmalig holen
         env:
           BRIDGE_URL: ${{ secrets.BRIDGE_URL }}
           BRIDGE_TOKEN: ${{ secrets.BRIDGE_TOKEN }}
           BUILD_ID: ${{ inputs.build_id }}
         run: ./scripts/fetch-artifact.sh
-
-      - name: Emulator booten
-        env:
-          TARGET_API: ${{ matrix.api }}
-        run: ./scripts/boot-emulator.sh
-
-      - name: Geraetengroesse anpassen
-        run: |
-          if [ -n "${{ matrix.dpi }}" ]; then
-            adb shell wm size ${{ matrix.resolution }} >/dev/null 2>&1 || true
-            adb shell wm density ${{ matrix.dpi }} >/dev/null 2>&1 || true
-            sleep 4
-          fi
-
-      - name: Smoke-Ablauf
-        run: |
-          if [ -z "${{ inputs.test_activity }}" ]; then
-            echo "TEST_ACTIVITY=${PACKAGE}/.MainActivity" >> "$GITHUB_ENV"
-          else
-            echo "TEST_ACTIVITY=${{ inputs.test_activity }}" >> "$GITHUB_ENV"
-          fi
-          ./scripts/run-smoke.sh
-
-      - name: Instrumentationstests
-        id: instrumentation
-        if: ${{ inputs.test_apk_name != '' }}
-        run: |
-          EV="$RUNNER_TEMP/nectar-evidence"
-          mkdir -p "$EV/instrumentation"
-          BUILD_ID="${{ inputs.build_id }}"
-          ARTIFACT_NAME="${{ inputs.test_apk_name }}" \
-          BRIDGE_URL="${{ secrets.BRIDGE_URL }}" \
-          BRIDGE_TOKEN="${{ secrets.BRIDGE_TOKEN }}" \
-            ./scripts/fetch-artifact.sh
-          adb install -r -g "$ARTIFACT_PATH" 2>&1 | tee "$EV/instrumentation/install.txt"
-          set +e
-          adb shell am instrument -w -r -e package "$PACKAGE" \
-            > "$EV/instrumentation/run.txt" 2>&1
-          set -e
-          OK=$(grep -c "OK (" "$EV/instrumentation/run.txt" || true)
-          FAILC=$(grep -cE "FAILURES|Error|Exception" "$EV/instrumentation/run.txt" || true)
-          {
-            echo "INSTR_PASSED=$OK"
-            echo "INSTR_FAILED=$FAILC"
-          } >> "$GITHUB_ENV"
-
+      - name: Standard-Matrix ausfuehren
+        run: ./scripts/run-standard-matrix.sh
       - name: Ergebnis normalisieren
-        env:
-          TESTS_PASSED: ${{ steps.instrumentation.outputs.INSTR_PASSED }}
-          TESTS_FAILED: ${{ steps.instrumentation.outputs.INSTR_FAILED }}
+        if: always()
         run: |
-          MATRIX_JSON='[{"api":"${{ matrix.api }}","label":"${{ matrix.label }}","tag":"google_apis","arch":"x86_64","acceleration":"software"}]'
-          export MATRIX_JSON
-          BL=""
-          if [ "${CRASH_COUNT:-0}" -gt 0 ] || [ "${TESTS_FAILED:-0}" -gt 0 ]; then
-            VERDICT=FAIL
-            BL="Absturz, ANR oder fehlgeschlagener Test"
-          elif [ "${SCREEN_STATE:-unknown}" = "blank" ] || [ "${SHOT_OK:-0}" != "1" ]; then
-            VERDICT=FAIL
-            BL="Screenshot fehlt oder ist leer - kein Beleg fuer die Anzeige"
-          else
-            VERDICT=PASS
-          fi
-          export VERDICT
-          [ -n "$BL" ] && export BLOCKER="$BL"
+          if [ -z "${DEVICE_API:-}" ]; then VERDICT=INFRA_FAIL; BLOCKER='Emulator nicht bereit';
+          elif [ "${MATRIX_OK:-0}" = 1 ]; then VERDICT=PASS;
+          else VERDICT=FAIL; BLOCKER='Matrixprofil oder Beleg fehlgeschlagen'; fi
+          export VERDICT BLOCKER
           ./scripts/normalize-result.sh
-
-      - name: Ergebnis-Beleg
+      - name: Belege sichern
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: nectar-matrix-${{ inputs.app }}-${{ matrix.api }}-${{ matrix.label }}
+          name: nectar-matrix-${{ inputs.app }}-${{ inputs.request_id }}
           path: ${{ runner.temp }}/nectar-evidence
           retention-days: 7
           if-no-files-found: error

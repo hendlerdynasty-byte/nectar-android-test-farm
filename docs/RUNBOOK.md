@@ -28,39 +28,11 @@ ebenfalls kein KVM.
 Die Bruecke nimmt Artefakte kurzfristig auf und liefert sie gegen eine
 opake UUID plus Token. Sie laeuft auf dem Contabo-Server.
 
-### Bruecke einrichten
-
-Auf dem Server:
-
-```bash
-BRIDGE_ROOT=~/nectar-bridge
-mkdir -p "$BRIDGE_ROOT/artifacts" "$BRIDGE_ROOT/keys"
-
-# Token erzeugen
-openssl rand -hex 32 > "$BRIDGE_ROOT/keys/token"
-chmod 600 "$BRIDGE_ROOT/keys/token"
-```
-
-### Artefakt hochladen (aus der privaten Umgebung)
-
-```bash
-build_id=$(uuidgen | tr 'A-Z' 'a-z')
-scp app-debug.apk hendler@62.84.189.144:~/nectar-bridge/artifacts/$build_id.apk
-# 2. Bridge-Secret fuer das oeffentliche Repository setzen
-#    (einmalig, per gh secret set BRIDGE_TOKEN ...)
-```
-
-Der Workflow sieht nur `build_id`. Der Pfad auf dem Server ist
-`artifacts/<uuid>.apk` und damit nicht erratbar.
-
-### Aufraeumen
-
-Einraeumen **zwingend** nach jedem Lauf, sonst bleiben private APKs
-unnoetig liegen:
-
-```bash
-find ~/nectar-bridge/artifacts -name "*.apk" -mmin +60 -delete
-```
+Die Bridge stellt jedes Artefakt genau einmal bereit. `standard` verwendet daher
+nur einen Runner-Job: Nach einem privaten Download laufen die drei
+Emulatorprofile nacheinander. APK und Quellcode werden nicht als GitHub-Artefakt
+veroeffentlicht. Jeder neue Workflow-Lauf braucht eine neue `build_id` und
+einen frischen Upload ueber `POST /v1/upload`.
 
 ## Modi
 
@@ -68,7 +40,7 @@ find ~/nectar-bridge/artifacts -name "*.apk" -mmin +60 -delete
 |---|---|---|
 | `smoke` | 1 Geraet, aktuelle API | 15-20 min |
 | `standard` | 3 Konfigurationen (untere API, aktuelle API, grosses Display) | 45-60 min |
-| `release` | Phone, Tablet, Offline-Pfad, Zustandswiederherstellung, Asset-Pruefung | 60-75 min |
+| `release` | Phone, Tablet, Offline-Pfad, Prozessneustart, Asset-Pruefung | 60-75 min |
 
 ## Verdikt-Bedeutung
 
@@ -108,6 +80,5 @@ gh workflow run android-smoke.yml \
   -f build_id="<uuid>" \
   -f commit_sha="$(git rev-parse HEAD)" \
   -f artifact_name=app-debug.apk \
-  -f artifact_sha256="$(shasum -a 256 app-debug.apk | awk '{print $1}')" \
-  -f test_activity=com.example.app/.MainActivity
+  -f artifact_sha256="$(shasum -a 256 app-debug.apk | awk '{print $1}')"
 ```

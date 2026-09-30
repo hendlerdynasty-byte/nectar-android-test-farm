@@ -39,10 +39,6 @@ on:
         description: 'Versionscode'
         required: true
         type: string
-      test_activity:
-        description: 'Launcher-Aktivitaet'
-        required: false
-        type: string
       release_candidate:
         description: 'Release-Kandidaten-Kennung'
         required: true
@@ -89,10 +85,7 @@ jobs:
         run: |
           case "$ARTIFACT_NAME" in
             *.aab) echo "AAB erkannt - signiertes Release-Artefakt" ;;
-            *.apk)
-              echo "APK erkannt - ein Debug-Artefakt ist KEIN Release-Nachweis"
-              echo "DEBUG_ARTIFACT=1" >> "$GITHUB_ENV"
-              ;;
+            *.apk) echo "Release-Nachweis erfordert AAB"; exit 1 ;;
             *) echo "FEHLGESCHLAGEN: unerwartete Artefaktendung"; exit 1 ;;
           esac
 
@@ -107,18 +100,18 @@ jobs:
             echo "Keine offensichtlichen Test-Assets" | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: Bundletool bereitstellen
+        if: ${{ endsWith(inputs.artifact_name, '.aab') }}
+        run: ./scripts/setup-bundletool.sh
+
+      - name: Ziel-API aus AAB und Images bestimmen
+        run: ./scripts/select-target-api.sh
+
       - name: Emulator booten
-        env:
-          TARGET_API: '34'
         run: ./scripts/boot-emulator.sh
 
       - name: Smoke auf Phone
         run: |
-          if [ -z "${{ inputs.test_activity }}" ]; then
-            echo "TEST_ACTIVITY=${PACKAGE}/.MainActivity" >> "$GITHUB_ENV"
-          else
-            echo "TEST_ACTIVITY=${{ inputs.test_activity }}" >> "$GITHUB_ENV"
-          fi
           ./scripts/run-smoke.sh
           cat "$RUNNER_TEMP/nectar-evidence/SUMMARY.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
 
@@ -131,7 +124,9 @@ jobs:
           adb shell am start -n "$TEST_ACTIVITY" >/dev/null 2>&1 || true
           sleep 6
           mkdir -p "$RUNNER_TEMP/nectar-evidence/screenshots"
-          timeout 45 adb exec-out screencap -p > "$RUNNER_TEMP/nectar-evidence/screenshots/tablet-layout.png" 2>/dev/null || true
+          timeout 45 adb exec-out screencap -p > "$RUNNER_TEMP/nectar-evidence/screenshots/tablet-layout.png"
+          python3 ./scripts/verify-screenshot.py "$RUNNER_TEMP/nectar-evidence/screenshots/tablet-layout.png"
+          ./scripts/check-foreground.sh
 
       - name: Offline-Pfad
         run: |
@@ -140,22 +135,31 @@ jobs:
           adb shell am force-stop "$PACKAGE" >/dev/null 2>&1 || true
           adb shell am start -n "$TEST_ACTIVITY" >/dev/null 2>&1 || true
           sleep 6
-          timeout 45 adb exec-out screencap -p > "$RUNNER_TEMP/nectar-evidence/screenshots/offline-path.png" 2>/dev/null || true
+          timeout 45 adb exec-out screencap -p > "$RUNNER_TEMP/nectar-evidence/screenshots/offline-path.png"
+          python3 ./scripts/verify-screenshot.py "$RUNNER_TEMP/nectar-evidence/screenshots/offline-path.png"
+          ./scripts/check-foreground.sh
           adb shell svc wifi enable >/dev/null 2>&1 || true
 
-      - name: Zustandswiederherstellung nach Prozessabbruch
+      - name: Neustart nach Prozessabbruch
         run: |
           adb shell am force-stop "$PACKAGE" >/dev/null 2>&1 || true
           sleep 3
           adb shell am start -n "$TEST_ACTIVITY" >/dev/null 2>&1 || true
           sleep 6
-          RESUMED=$(adb shell dumpsys activity activities 2>/dev/null | grep -c "$PACKAGE" || true)
-          echo "Wiederhergestellte Aktivitaeten: $RESUMED" | tee -a "$GITHUB_STEP_SUMMARY"
-          if [ "${RESUMED:-0}" -gt 0 ]; then
-            echo "RESUME_OK=1" >> "$GITHUB_ENV"
+          if ./scripts/check-foreground.sh; then
+            echo "Prozessneustart: App wieder im Vordergrund" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "PROCESS_RESTART_OK=1" >> "$GITHUB_ENV"
           else
-            echo "RESUME_OK=0" >> "$GITHUB_ENV"
+            echo "PROCESS_RESTART_OK=0" >> "$GITHUB_ENV"
           fi
+
+      - name: Screenshots und Vordergrund pruefen
+        run: |
+          for shot in smoke-foreground tablet-layout offline-path; do
+            python3 ./scripts/verify-screenshot.py "$RUNNER_TEMP/nectar-evidence/screenshots/$shot.png"
+          done
+          ./scripts/check-foreground.sh >/dev/null
+          echo "RELEASE_EVIDENCE_OK=1" >> "$GITHUB_ENV"
 
       - name: Logcat sichern
         run: |
@@ -163,11 +167,15 @@ jobs:
           adb logcat -d -v threadtime -t 2000 > "$RUNNER_TEMP/nectar-evidence/logcat/release-logcat.txt" 2>/dev/null || true
 
       - name: Ergebnis normalisieren
+        if: always()
         run: |
-          MATRIX_JSON='[{"api":"34","label":"phone","acceleration":"software"},{"api":"34","label":"tablet","acceleration":"software"},{"api":"34","label":"offline","acceleration":"software"}]'
+          MATRIX_JSON="[{\"api\":\"${TARGET_API:-unknown}\",\"label\":\"phone\"},{\"api\":\"${TARGET_API:-unknown}\",\"label\":\"tablet\"},{\"api\":\"${TARGET_API:-unknown}\",\"label\":\"offline\"}]"
           export MATRIX_JSON
           BL=""
-          if [ "${CRASH_COUNT:-0}" -gt 0 ]; then
+          if [ -z "${DEVICE_API:-}" ]; then
+            VERDICT=INFRA_FAIL
+            BL="Emulator nicht bereit"
+          elif [ "${CRASH_COUNT:-0}" -gt 0 ]; then
             VERDICT=FAIL
             BL="Absturz oder ANR festgestellt"
           elif [ "${DEBUG_ARTIFACT:-0}" = "1" ]; then
@@ -176,9 +184,15 @@ jobs:
           elif [ -n "${ASSETS_FOUND:-}" ]; then
             VERDICT=FAIL
             BL="Test-Assets im Artefakt: ${ASSETS_FOUND}"
-          elif [ "${RESUME_OK:-0}" = "0" ]; then
+          elif [ "${RELEASE_EVIDENCE_OK:-0}" != "1" ]; then
             VERDICT=FAIL
-            BL="Zustandswiederherstellung fehlgeschlagen"
+            BL="Phone-, Tablet- oder Offline-Beleg fehlt"
+          elif [ "${AAB_INSTALLED:-0}" != "1" ]; then
+            VERDICT=FAIL
+            BL="Release-AAB wurde nicht installiert"
+          elif [ "${PROCESS_RESTART_OK:-0}" = "0" ]; then
+            VERDICT=FAIL
+            BL="App nach Prozessneustart nicht sichtbar"
           elif [ "${SCREEN_STATE:-unknown}" = "blank" ] || [ "${SHOT_OK:-0}" != "1" ]; then
             VERDICT=FAIL
             BL="Screenshot fehlt oder ist leer - kein Beleg fuer die Anzeige"
@@ -190,6 +204,7 @@ jobs:
           ./scripts/normalize-result.sh
 
       - name: Beleg sichern
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nectar-release-${{ inputs.app }}-${{ inputs.release_candidate }}
