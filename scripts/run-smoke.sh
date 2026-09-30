@@ -83,7 +83,6 @@ log "Rotation geprueft"
   LOGCAT_LINES=$(wc -l < "$EV/logcat/full-logcat.txt" 2>/dev/null | tr -d ' ' || echo 0)
   log "Logcat: ${LOGCAT_LINES:-0} Zeilen"
   echo "LOGCAT_LINES=${LOGCAT_LINES:-0}" >> "$GITHUB_ENV"
-"$ADB" logcat -d -v threadtime > "$EV/logcat/full-logcat.txt" 2>/dev/null || true
 
 # 7) Absturz- und ANR-Erkennung
 # Achtung: grep -c gibt 0 aus UND liefert Exit 1. Ein "|| echo 0"
