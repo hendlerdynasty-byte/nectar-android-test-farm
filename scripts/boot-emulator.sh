@@ -171,6 +171,25 @@ done
 BOOTED=1
 log "Gebootet nach ${WAITED}s"
 
+# ── Auf den Package-Manager warten ──────────────────────────────
+# sys.boot_completed=1 wird gesetzt, BEVOR der Package-Manager
+# bereit ist. Ohne diese Warte scheitert jede Installation mit
+# "Can't find service: package". In Software-Emulation ist die
+# Verzoegerung deutlich groesser als mit KVM.
+log "Warte auf Package-Manager"
+PM_WAITED=0
+PM_TIMEOUT=300
+until [ "$("$ADB" shell service check package 2>/dev/null | tr -d '\r\n ')" = "found" ]; do
+  sleep 10
+  PM_WAITED=$((PM_WAITED + 10))
+  if [ "${PM_WAITED}" -ge "${PM_TIMEOUT}" ]; then
+    log "WARNUNG: Package-Manager nach ${PM_TIMEOUT}s nicht bereit"
+    break
+  fi
+  [ $((PM_WAITED % 60)) -eq 0 ] && log "  ... warte noch (${PM_WAITED}s)"
+done
+log "Package-Manager bereit nach ${PM_WAITED}s"
+
 # ── Geraet vorbereiten ─────────────────────────────────────────
 "$ADB" shell input keyevent 82 >/dev/null 2>&1 || true
 "$ADB" shell settings put global window_animation_scale 0 >/dev/null 2>&1 || true
