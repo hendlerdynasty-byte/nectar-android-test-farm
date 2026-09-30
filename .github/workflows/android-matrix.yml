@@ -9,6 +9,8 @@ on:
       commit_sha: { description: 'Commit-SHA', required: true, type: string }
       artifact_name: { description: 'APK-Dateiname', required: true, type: string }
       artifact_sha256: { description: 'SHA256', required: true, type: string }
+      version_name: { description: 'Versionsname', required: false, type: string }
+      version_code: { description: 'Versionscode', required: false, type: string }
 concurrency:
   group: matrix-${{ inputs.app }}
   cancel-in-progress: false
@@ -21,6 +23,8 @@ env:
   COMMIT_SHA: ${{ inputs.commit_sha }}
   ARTIFACT_NAME: ${{ inputs.artifact_name }}
   ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
+  VERSION_NAME: ${{ inputs.version_name }}
+  VERSION_CODE: ${{ inputs.version_code }}
   MODE: standard
 jobs:
   test:
