@@ -37,32 +37,35 @@ env:
   MODE: standard
 
 jobs:
-  # Bewusst schlank: untere unterstuetzte API und aktuelle API.
-  # Kein kartesisches Produkt ohne Evidenz.
-  matrix:
-    include:
-      - api: '29'
-        tag: google_apis
-        label: 'untere-API'
-      - api: '34'
-        tag: google_apis
-        label: 'aktuelle-API'
-      - api: '34'
-        tag: google_apis
-        label: 'grosses-Display'
-        dpi: 420
-        resolution: 1440x3120
-
   test:
     name: ${{ matrix.label }} (API ${{ matrix.api }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 75
+
+    # Bewusst schlank: untere unterstuetzte API, aktuelle API und ein
+    # grosses Display. Kein kartesisches Produkt ohne Evidenz.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - api: '29'
+            tag: google_apis
+            label: 'untere-API'
+          - api: '34'
+            tag: google_apis
+            label: 'aktuelle-API'
+          - api: '34'
+            tag: google_apis
+            label: 'grosses-Display'
+            dpi: 420
+            resolution: 1440x3120
 
     steps:
       - name: Repository auschecken
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+
       - name: Artefakt holen
         env:
           BRIDGE_URL: ${{ secrets.BRIDGE_URL }}
@@ -80,12 +83,10 @@ jobs:
           if [ -n "${{ matrix.dpi }}" ]; then
             adb shell wm size ${{ matrix.resolution }} >/dev/null 2>&1 || true
             adb shell wm density ${{ matrix.dpi }} >/dev/null 2>&1 || true
-            sleep 3
+            sleep 4
           fi
 
       - name: Smoke-Ablauf
-        env:
-          TEST_ACTIVITY: ${{ inputs.test_activity }}
         run: |
           if [ -z "${{ inputs.test_activity }}" ]; then
             echo "TEST_ACTIVITY=${PACKAGE}/.MainActivity" >> "$GITHUB_ENV"
@@ -100,7 +101,6 @@ jobs:
         run: |
           EV="$RUNNER_TEMP/nectar-evidence"
           mkdir -p "$EV/instrumentation"
-          # Test-APK kommt aus derselben privaten Bridge
           BUILD_ID="${{ inputs.build_id }}"
           ARTIFACT_NAME="${{ inputs.test_apk_name }}" \
           BRIDGE_URL="${{ secrets.BRIDGE_URL }}" \
@@ -112,12 +112,11 @@ jobs:
             > "$EV/instrumentation/run.txt" 2>&1
           set -e
           OK=$(grep -c "OK (" "$EV/instrumentation/run.txt" || true)
-          FAIL=$(grep -cE "FAILURES|Error|Exception" "$EV/instrumentation/run.txt" || true)
+          FAILC=$(grep -cE "FAILURES|Error|Exception" "$EV/instrumentation/run.txt" || true)
           {
             echo "INSTR_PASSED=$OK"
-            echo "INSTR_FAILED=$FAIL"
+            echo "INSTR_FAILED=$FAILC"
           } >> "$GITHUB_ENV"
-          adb pull /sdcard/androidTest-results /  "$EV/instrumentation" 2>/dev/null || true
 
       - name: Ergebnis normalisieren
         env:
@@ -126,8 +125,10 @@ jobs:
         run: |
           MATRIX_JSON='[{"api":"${{ matrix.api }}","label":"${{ matrix.label }}","tag":"google_apis","arch":"x86_64","acceleration":"software"}]'
           export MATRIX_JSON
+          BL=""
           if [ "${CRASH_COUNT:-0}" -gt 0 ] || [ "${TESTS_FAILED:-0}" -gt 0 ]; then
             VERDICT=FAIL
+            BL="Absturz, ANR oder fehlgeschlagener Test"
           elif [ "${SCREEN_STATE:-unknown}" = "blank" ] || [ "${SHOT_OK:-0}" != "1" ]; then
             VERDICT=FAIL
             BL="Screenshot fehlt oder ist leer - kein Beleg fuer die Anzeige"
@@ -135,6 +136,7 @@ jobs:
             VERDICT=PASS
           fi
           export VERDICT
+          [ -n "$BL" ] && export BLOCKER="$BL"
           ./scripts/normalize-result.sh
 
       - name: Ergebnis-Beleg
