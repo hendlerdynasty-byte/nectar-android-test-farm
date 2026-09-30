@@ -55,7 +55,7 @@ jobs:
       - name: Vergleichsergebnis
         if: always()
         run: |
-          if [ "${INSTALL_OK:-0}" = 1 ] && [ "${SHOT_OK:-0}" = 1 ] && [ "${SCREEN_STATE:-}" = content ] && [ "${CRASH_COUNT:-0}" = 0 ]; then VERDICT=PASS; else VERDICT=FAIL; BLOCKER='Benchmark-Smoke ohne vollstaendigen Beleg'; fi
+          if [ "${INSTALL_OK:-0}" = 1 ] && [ "${SHOT_OK:-0}" = 1 ] && [ "${SCREEN_STATE:-}" = content ] && [ "${CRASH_COUNT:-0}" = 0 ] && [ "${SYSTEM_ANR_COUNT:-0}" = 0 ]; then VERDICT=PASS; else VERDICT=FAIL; BLOCKER='Benchmark-Smoke ohne vollstaendigen Beleg'; fi
           export VERDICT BLOCKER
           MATRIX_JSON="[{\"api\":\"${TARGET_API:-unknown}\",\"runner\":\"${{ matrix.runner }}\",\"acceleration\":\"${ACCELERATION:-unknown}\",\"boot_seconds\":\"${BOOT_SECONDS:-unknown}\",\"cold_start_ms\":\"${COLD_START_MS:-unknown}\"}]"
           export MATRIX_JSON

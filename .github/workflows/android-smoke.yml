@@ -116,7 +116,7 @@ jobs:
           elif [ "${INSTALL_OK:-0}" != "1" ]; then
             VERDICT=FAIL
             BL="APK wurde nicht installiert"
-          elif [ "${CRASH_COUNT:-0}" -gt 0 ]; then
+          elif [ "${CRASH_COUNT:-0}" -gt 0 ] || [ "${SYSTEM_ANR_COUNT:-0}" -gt 0 ]; then
             VERDICT=FAIL
             BL="Absturz oder ANR festgestellt"
           elif [ "${SCREEN_STATE:-unknown}" = "blank" ]; then

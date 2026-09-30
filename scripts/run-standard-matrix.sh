@@ -38,6 +38,8 @@ for PROFILE in lower current tablet; do
   ./scripts/run-smoke.sh || FAILED=1
   CRASHES=$(grep '^CRASH_COUNT=' "$GITHUB_ENV" | tail -1 | cut -d= -f2)
   [ "${CRASHES:-0}" -eq 0 ] || FAILED=1
+  ANRS=$(grep '^SYSTEM_ANR_COUNT=' "$GITHUB_ENV" | tail -1 | cut -d= -f2)
+  [ "${ANRS:-0}" -eq 0 ] || FAILED=1
   [ "$(tail -1 <(grep '^SHOT_OK=' "$GITHUB_ENV") | cut -d= -f2)" = 1 ] || FAILED=1
   [ "$(tail -1 <(grep '^SCREEN_STATE=' "$GITHUB_ENV") | cut -d= -f2)" = content ] || FAILED=1
   cp "$EV/screenshots/smoke-foreground.png" "$EV/screenshots/$PROFILE-api$API.png" || FAILED=1
