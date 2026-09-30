@@ -138,8 +138,10 @@ jobs:
           else
             VERDICT=PASS
           fi
-          [ -n "$BL" ] && echo "BLOCKER=$BL" >> "$GITHUB_ENV"
           export VERDICT
+          # BL muss exportiert werden: $GITHUB_ENV wirkt erst fuer den
+          # naechsten Schritt, nicht fuer das gerade laufende Skript.
+          [ -n "$BL" ] && export BLOCKER="$BL"
           ./scripts/normalize-result.sh
 
       - name: Ergebnis als Beleg sichern
