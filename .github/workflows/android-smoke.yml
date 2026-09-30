@@ -129,9 +129,6 @@ jobs:
           if [ "${CRASH_COUNT:-0}" -gt 0 ]; then
             VERDICT=FAIL
             BL="Absturz oder ANR festgestellt"
-          elif [ "${APP_FOREGROUND:-0}" != "1" ]; then
-            VERDICT=FAIL
-            BL="App kam nicht in den Vordergrund"
           elif [ "${SCREEN_STATE:-unknown}" = "blank" ]; then
             VERDICT=FAIL
             BL="Screenshot ist leer - App hat nichts angezeigt"

@@ -149,6 +149,9 @@ jobs:
           export BLOCKERS
           if [ "${CRASH_COUNT:-0}" -gt 0 ] || [ -n "${BLOCKERS}" ]; then
             VERDICT=FAIL
+          elif [ "${SCREEN_STATE:-unknown}" = "blank" ] || [ "${SHOT_OK:-0}" != "1" ]; then
+            VERDICT=FAIL
+            BL="Screenshot fehlt oder ist leer - kein Beleg fuer die Anzeige"
           else
             VERDICT=PASS
           fi
