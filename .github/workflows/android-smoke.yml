@@ -122,11 +122,23 @@ jobs:
         env:
           MATRIX_JSON: '[{"api":"${{ inputs.target_api }}","tag":"google_apis","arch":"x86_64","acceleration":"software"}]'
         run: |
+          # Verdikt: PASS nur, wenn die App wirklich gelaufen ist.
+          # Ohne Vordergrund-Aktivitaet oder mit leerem Screenshot
+          # waere das ein PASS ohne Beleg - das ist verboten.
+          BL=""
           if [ "${CRASH_COUNT:-0}" -gt 0 ]; then
             VERDICT=FAIL
+            BL="Absturz oder ANR festgestellt"
+          elif [ "${APP_FOREGROUND:-0}" != "1" ]; then
+            VERDICT=FAIL
+            BL="App kam nicht in den Vordergrund"
+          elif [ "${SCREEN_STATE:-unknown}" = "blank" ]; then
+            VERDICT=FAIL
+            BL="Screenshot ist leer - App hat nichts angezeigt"
           else
             VERDICT=PASS
           fi
+          [ -n "$BL" ] && echo "BLOCKER=$BL" >> "$GITHUB_ENV"
           export VERDICT
           ./scripts/normalize-result.sh
 

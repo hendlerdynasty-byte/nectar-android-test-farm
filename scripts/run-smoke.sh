@@ -62,6 +62,28 @@ sleep 4
 # 4) Screenshot-Beweis
 "$ADB" shell screencap -p /sdcard/nectar-smoke.png >/dev/null 2>&1 || true
 "$ADB" pull /sdcard/nectar-smoke.png "$EV/screenshots/smoke-foreground.png" >/dev/null 2>&1 || true
+# 3b) Wirklich gestartet? - am start -W liefert im Software-Emulator
+#     regelmaessig "LaunchState: UNKNOWN", selbst wenn die App laeuft.
+#     Verlaesslich sind stattdessen: Vordergrund-Aktivitaet und ein
+#     Screenshot mit echtem Inhalt. Ein leerer Bildschirm ist KEIN PASS.
+log "Starte pruefen: Vordergrund-Aktivitaet"
+LAUNCH_STATE=$(grep -E "^Status:" "$EV/activity-start.txt" 2>/dev/null | head -1 | tr -d '\r')
+log "  am start -W: ${LAUNCH_STATE:-unbekannt}"
+
+FOCUS=$("$ADB" shell dumpsys window 2>/dev/null | grep -m1 -E "mCurrentFocus|mFocusedApp" | tr -d '\r')
+RESUMED=$("$ADB" shell dumpsys activity activities 2>/dev/null | grep -m1 "mResumedActivity" | tr -d '\r')
+APP_IN_FG=0
+case "$FOCUS$RESUMED" in
+  *"$PACKAGE"*) APP_IN_FG=1 ;;
+esac
+log "  Vordergrund: ${APP_IN_FG} (${FOCUS:-unbekannt})"
+if [ "$APP_IN_FG" = "1" ]; then
+  echo "APP_FOREGROUND=1" >> "$GITHUB_ENV"
+else
+  echo "APP_FOREGROUND=0" >> "$GITHUB_ENV"
+  log "  WARNUNG: App ist nicht im Vordergrund"
+fi
+
 log "Screenshot gesichert"
 
 # 5) Rotation / Resume
@@ -100,6 +122,44 @@ log "Rotation geprueft"
                  "$EV/logcat/full-logcat.txt" 2>/dev/null || true; } | head -1 )
 CRASH_COUNT="${CRASH_COUNT:-0}"
 case "$CRASH_COUNT" in ''|*[!0-9]*) CRASH_COUNT=0 ;; esac
+# 7b) Screenshot-Inhalt pruefen.
+#      Ein einfarbiger Bildschirm (Launcher, schwarzer Screen, Geraet
+#      im Standby) bedeutet: die App ist nicht wirklich gelaufen.
+#      Ohne diese Pruefung wuerde ein leerer Lauf als PASS gelten.
+SCREEN="$EV/screenshots/smoke-foreground.png"
+SCREEN_STATE="unknown"
+if [ -s "$SCREEN" ]; then
+  SCREEN_STATE=$(python3 - "$SCREEN" <<'PYEOF'
+import sys, zlib, struct
+try:
+    d = open(sys.argv[1], "rb").read()
+    i, idat = 8, b""
+    while i < len(d):
+        ln = struct.unpack(">I", d[i:i+4])[0]
+        typ = d[i+4:i+8]
+        if typ == b"IDAT":
+            idat += d[i+8:i+8+ln]
+        i += 12 + ln
+    raw = zlib.decompress(idat)
+    # Vielfalt der Bytewerte: einfarbiger Bildschirm -> wenige Werte
+    sample = raw[:6000]
+    distinct = len(set(sample))
+    if distinct >= 20:
+        print("content")
+    elif distinct >= 8:
+        print("sparse")
+    else:
+        print("blank")
+except Exception:
+    print("unknown")
+PYEOF
+)
+  log "Screenshot-Inhalt: ${SCREEN_STATE} ($(du -k "$SCREEN" | cut -f1) KB)"
+else
+  log "Screenshot fehlt"
+fi
+echo "SCREEN_STATE=${SCREEN_STATE}" >> "$GITHUB_ENV"
+
 log "Gefundene Crash-/ANR-Eintraege: ${CRASH_COUNT}"
 
 echo "CRASH_COUNT=${CRASH_COUNT}" >> "$GITHUB_ENV"

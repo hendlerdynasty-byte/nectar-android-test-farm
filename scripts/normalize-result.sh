@@ -19,8 +19,8 @@ VERSION_NAME="${VERSION_NAME:-unknown}" VERSION_CODE="${VERSION_CODE:-0}" \
 TESTS_PASSED="${TESTS_PASSED:-0}" TESTS_FAILED="${TESTS_FAILED:-0}" \
 CRASHES="${CRASH_COUNT:-0}" ANRS="${ANR_COUNT:-0}" \
 INFRA_FAILURES="${INFRA_FAILURES:-0}" VERDICT="${VERDICT:-INFRA_FAIL}" \
-BLOCKERS="${BLOCKERS:-}" \
-EV="$EV" REQUEST_ID="$REQUEST_ID" APP_ID="$APP_ID" PACKAGE="$PACKAGE" \
+BLOCKERS="${BLOCKERS:-}" BLOCKER="${BLOCKER:-}" \
+EV="$EV" BLOCKER="$BLOCKER" REQUEST_ID="$REQUEST_ID" APP_ID="$APP_ID" PACKAGE="$PACKAGE" \
 COMMIT_SHA="$COMMIT_SHA" \
 python3 - <<'PY'
 import json, os, glob, datetime
@@ -78,7 +78,9 @@ result = {
     "anrs": anrs,
     "infra_failures": int(os.environ.get("INFRA_FAILURES") or 0),
     "verdict": os.environ.get("VERDICT", "INFRA_FAIL"),
-    "blockers": [b for b in (os.environ.get("BLOCKERS") or "").split(";") if b],
+    "blockers": [b for b in (
+        (os.environ.get("BLOCKERS") or "") + ";" + (os.environ.get("BLOCKER") or "")
+    ).split(";") if b.strip()],
     "evidence": evidence,
     "timestamp_utc": datetime.datetime.now(datetime.timezone.utc)
                      .strftime("%Y-%m-%dT%H:%M:%SZ"),
