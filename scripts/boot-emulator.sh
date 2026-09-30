@@ -62,6 +62,14 @@ AVDMANAGER="$(find_tool avdmanager || true)"
 EMULATOR="$(find_tool emulator || true)"
 ADB="$(find_tool adb || true)"
 
+# AVD-Speicherort explizit festlegen.
+# Ohne das legt avdmanager die AVD an einem Ort ab, an dem der
+# Emulator sie nicht findet ("Unknown AVD name").
+AVD_HOME="${HOME}/.android/avd"
+mkdir -p "$AVD_HOME"
+export ANDROID_AVD_HOME="$AVD_HOME"
+log "AVD_HOME: ${AVD_HOME}"
+
 log "SDK: ${SDK}"
 log "sdkmanager:  ${SDKMANAGER:-FEHLT}"
 log "avdmanager:  ${AVDMANAGER:-FEHLT}"
@@ -111,7 +119,12 @@ log "AVD anlegen: ${AVD_NAME}"
 {
   echo "no"
 } | "$AVDMANAGER" create avd -n "${AVD_NAME}" -k "${SYSTEM_IMAGE}" --force >/dev/null 2>&1 || true
-log "AVD-Liste: $("$AVDMANAGER" list avd 2>/dev/null | grep -c "${AVD_NAME}" || echo 0) Treffer"
+if [ ! -f "${AVD_HOME}/${AVD_NAME}.ini" ]; then
+  log "AVD-.ini fehlt unter ${AVD_HOME} - breite Suche:"
+  find "$HOME/.android" "$SDK" -maxdepth 4 -name "${AVD_NAME}.ini" 2>/dev/null | head -3 | sed 's/^/    /'
+  die "AVD nicht dort angelegt, wo der Emulator sucht" 23
+fi
+log "AVD-Datei bestaetigt: ${AVD_HOME}/${AVD_NAME}.ini"
 
 # ── Emulator starten ────────────────────────────────────────────
 log "Emulator starten (${ACCEL_MODE})"
