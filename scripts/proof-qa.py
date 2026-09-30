@@ -88,8 +88,17 @@ def main(work):
             elif kind=='expect_absent':
                 root,raw=ui();check(name,not any(step['text'] in n.get('text','') for n in root.iter('node')))
             elif kind=='process_death_resume':
-                call('shell','input','keyevent','3');time.sleep(1);call('shell','am','kill',q['package']);time.sleep(2)
-                check(name+'_process_dead',not call('shell','pidof',q['package']).stdout.strip())
+                call('shell','input','keyevent','3');time.sleep(1)
+                before=call('shell','pidof',q['package']).stdout.strip().split()
+                if not before or any(not x.isdigit() for x in before):raise RuntimeError('PROCESS_DEATH_TARGET_UNAVAILABLE')
+                # am kill may intentionally retain a process on new Android/large-screen configurations.
+                # Debuggable APK: inject actual SIGKILL as that app UID, never another app or host process.
+                for pid in before:
+                    killed=call('shell','run-as',q['package'],'/system/bin/kill','-9',pid)
+                    if killed.returncode:raise RuntimeError('OWN_UID_PROCESS_DEATH_INJECTION_UNAVAILABLE')
+                time.sleep(2);dead=not call('shell','pidof',q['package']).stdout.strip()
+                if not check(name+'_process_dead',dead):raise RuntimeError('PROCESS_DEATH_INJECTION_DID_NOT_TERMINATE')
+                result.setdefault('fault_injections',[]).append({'kind':'process_death','method':'SIGKILL_AS_OWN_APP_UID','target_package':q['package'],'prior_pids':before,'absence_verified':True})
                 p=call('shell','am','start','-W','-n',activity);time.sleep(2);check(name+'_relaunch',p.returncode==0)
             else:raise RuntimeError('UNSUPPORTED_PRIVATE_FLOW_STEP')
         if steps:capture('flow_complete')
