@@ -93,6 +93,10 @@ def main(work):
                 p=call('shell','am','start','-W','-n',activity);time.sleep(2);check(name+'_relaunch',p.returncode==0)
             else:raise RuntimeError('UNSUPPORTED_PRIVATE_FLOW_STEP')
         if steps:capture('flow_complete')
+        for asset in assets:
+            checksum=call('shell','sha256sum','/sdcard/Download/'+asset['filename'])
+            if checksum.returncode:raise RuntimeError('SOURCE_REHASH_TOOL_UNAVAILABLE')
+            check('public_asset_source_unchanged',checksum.stdout.split()[0]==asset['sha256'])
         l=call('logcat','-d','-v','threadtime','-t','2500',timeout=60);(work/'logcat.txt').write_text(l.stdout)
         check('logcat_available',l.returncode==0 and bool(l.stdout.strip()))
         blocks=re.split(r'(?=FATAL EXCEPTION)',l.stdout)
