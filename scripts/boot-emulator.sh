@@ -29,6 +29,10 @@ SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
 
 find_tool() {
   local name="$1" cand
+  case "$name" in
+    emulator) [ -x "$SDK/emulator/emulator" ] && { echo "$SDK/emulator/emulator"; return 0; } ;;
+    adb) [ -x "$SDK/platform-tools/adb" ] && { echo "$SDK/platform-tools/adb"; return 0; } ;;
+  esac
   cand="$(command -v "$name" 2>/dev/null || true)"
   if [ -n "$cand" ] && [ -x "$cand" ]; then echo "$cand"; return 0; fi
   # Bekannte Orte in den cmdline-tools-Versionen
