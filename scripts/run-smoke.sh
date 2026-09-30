@@ -64,19 +64,24 @@ sleep 4
 # screencap gelegentlich zu frueh oder leer - deshalb mehrfach
 # versuchen, bis eine nicht-leere Datei vorliegt.
 SHOT_OK=0
-for TRY in 1 2 3; do
-  "$ADB" shell screencap -p /sdcard/nectar-smoke.png >/dev/null 2>&1 || true
-  sleep 3
+# Wichtig: "adb shell screencap" plus "/sdcard"-Umweg ist auf dem
+# Software-Emulator unzuesslich - das Bild kommt haeufig leer zurueck.
+# "adb exec-out screencap -p" streamt direkt und ist die robuste Variante.
+for TRY in 1 2 3 4; do
   rm -f "$EV/screenshots/smoke-foreground.png" 2>/dev/null || true
-  "$ADB" pull /sdcard/nectar-smoke.png "$EV/screenshots/smoke-foreground.png" >/dev/null 2>&1 || true
-  if [ -s "$EV/screenshots/smoke-foreground.png" ]; then SHOT_OK=1; break; fi
+  if timeout 45 "$ADB" exec-out screencap -p > "$EV/screenshots/smoke-foreground.png" 2>/dev/null; then
+    if [ -s "$EV/screenshots/smoke-foreground.png" ]; then SHOT_OK=1; break; fi
+  fi
   log "  Screenshot-Versuch ${TRY} leer, neuer Versuch"
-  sleep 5
+  # App aufwecken, falls der Bildschirm im Standby liegt
+  "$ADB" shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+  "$ADB" shell input keyevent 82 >/dev/null 2>&1 || true
+  sleep 4
 done
 if [ "$SHOT_OK" = "1" ]; then
   log "Screenshot gesichert ($(du -k "$EV/screenshots/smoke-foreground.png" | cut -f1) KB)"
 else
-  log "Screenshot fehlt nach 3 Versuchen - das ist ein Blocker"
+  log "Screenshot fehlt nach 4 Versuchen - das ist ein Blocker"
 fi
 echo "SHOT_OK=$SHOT_OK" >> "$GITHUB_ENV"
 
