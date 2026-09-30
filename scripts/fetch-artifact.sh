@@ -64,7 +64,15 @@ if [ ! -s "$DEST" ]; then
   exit 13
 fi
 
-ACTUAL_SHA=$(shasum -a 256 "$DEST" 2>/dev/null | awk '{print $1}' || sha256sum "$DEST" | awk '{print $1}')
+# sha256sum (coreutils) ist auf Linux immer vorhanden, shasum nicht.
+if command -v sha256sum > /dev/null 2>&1; then
+  ACTUAL_SHA=$(sha256sum "$DEST" | awk '{print $1}')
+elif command -v shasum > /dev/null 2>&1; then
+  ACTUAL_SHA=$(shasum -a 256 "$DEST" | awk '{print $1}')
+else
+  log "FEHLGESCHLAGEN: kein sha256sum und kein shasum vorhanden"
+  exit 15
+fi
 
 # fail closed: Wenn eine erwartete Prüfsumme vorliegt, muss sie stimmen.
 if [ -n "${ARTIFACT_SHA256:-}" ]; then
