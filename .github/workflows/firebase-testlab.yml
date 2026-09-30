@@ -108,6 +108,9 @@ jobs:
         with:
           workload_identity_provider: 'projects/205243761015/locations/global/workloadIdentityPools/github-farm-pool/providers/github-farm-provider'
           service_account: 'nectar-testlab-ci@nectar-android-testlab-01.iam.gserviceaccount.com'
+          # Der Provider akzeptiert genau diese Audience; der STS-Tausch
+          # vergleicht sie mit dem aud des angeforderten ID-Tokens.
+          audience: 'https://github.com/hendlerdynasty-byte'
 
       - name: Identität protokollieren (ohne Secrets)
         run: |
@@ -130,7 +133,10 @@ jobs:
           name: nectar-result-${{ inputs.app }}-${{ inputs.request_id }}
           path: ${{ runner.temp }}/nectar-evidence
           retention-days: 7
-          if-no-files-found: error
+          # Vor dem Runner (z.B. Auth-Fehler) existiert keine Evidence —
+          # Warnung statt Fehler; der Job bleibt durch den fehlgeschlagenen
+          # Schritt bzw. das fail-closed Gate rot.
+          if-no-files-found: warn
 
       - name: Ergebnis in die Zusammenfassung
         if: always()
