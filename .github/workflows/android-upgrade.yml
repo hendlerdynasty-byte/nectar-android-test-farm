@@ -57,6 +57,10 @@ on:
         description: 'Erwartete SHA256 des Kandidaten-APK (fail closed)'
         required: false
         type: string
+      seed_sha256:
+        description: 'Erwartete SHA256 des Seed-Skripts (fail closed, ueberschreibt GITHUB_ENV-Vererbung)'
+        required: false
+        type: string
       version_name:
         description: 'Versionsname des Kandidaten'
         required: false
@@ -130,6 +134,7 @@ jobs:
           BRIDGE_TOKEN: ${{ secrets.BRIDGE_TOKEN }}
           BUILD_ID: ${{ inputs.build_id }}
           ARTIFACT_NAME: ${{ inputs.seed_script }}
+          ARTIFACT_SHA256: ${{ inputs.seed_sha256 }}
         run: |
           ./scripts/fetch-artifact.sh
           SCRIPT_PATH="${RUNNER_TEMP:-/tmp}/nectar-artifact/${ARTIFACT_NAME}"
