@@ -149,6 +149,8 @@ jobs:
         run: ./scripts/boot-emulator.sh
 
       - name: Upgrade-Test ausfuehren
+        env:
+          WORK_ART: ${{ runner.temp }}/nectar-artifact
         run: ./scripts/run-upgrade.sh
 
       - name: Ergebnis normalisieren
