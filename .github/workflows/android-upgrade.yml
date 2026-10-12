@@ -336,7 +336,7 @@ jobs:
           name: upgrade-result-${{ inputs.app }}-${{ inputs.request_id }}
           path: |
             result.json
-            screenshots/**
-            logs/**
+            ${{ runner.temp }}/nectar-evidence/screenshots/**
+            ${{ runner.temp }}/nectar-evidence/logcat/**
           if-no-files-found: ignore
           retention-days: 7
