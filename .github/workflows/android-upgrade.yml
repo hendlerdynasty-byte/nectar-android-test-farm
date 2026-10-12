@@ -1,0 +1,195 @@
+name: android-upgrade
+
+# In-Place-Upgrade-Regression: Baseline-APK installieren, Nutzerdaten
+# seeden, Kandidaten-APK OHNE Deinstallation darueber installieren,
+# Datenbestand verifizieren.
+#
+# Datenschutz-Eigenschaften (wie android-smoke):
+#   * Kein privates App-Repo wird geklont; die Farm kennt nur opake
+#     Build-IDs. Baseline- und Kandidaten-APK sowie das Seed-Skript
+#     kommen pro Lauf von der privaten Bridge.
+#   * Das Seed-Skript ist im Workflow eingebettet limitiert (reines
+#     adb/sqlite3-Regex-Denylist-Veto) und nach dem Lauf vom Runner
+#     geloescht.
+#
+# Nur manueller Start (workflow_dispatch) wie alle Farm-Workflows.
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: 'UUID der Anfrage'
+        required: true
+        type: string
+      app:
+        description: 'Kanonische App-Kennung'
+        required: true
+        type: string
+      package:
+        description: 'Android-Paketname (Baseline und Kandidat identisch)'
+        required: true
+        type: string
+      build_id:
+        description: 'Opake UUID der Artefakte auf der privaten Bridge'
+        required: true
+        type: string
+      commit_sha:
+        description: 'Commit-SHA des privaten Kandidaten-Repositorys'
+        required: true
+        type: string
+      baseline_apk:
+        description: 'Dateiname des Baseline-APK auf der Bridge'
+        required: true
+        type: string
+      candidate_apk:
+        description: 'Dateiname des Kandidaten-APK auf der Bridge'
+        required: true
+        type: string
+      seed_script:
+        description: 'Dateiname des Seed/Verify-Skripts auf der Bridge'
+        required: true
+        type: string
+      baseline_sha256:
+        description: 'Erwartete SHA256 des Baseline-APK (fail closed)'
+        required: false
+        type: string
+      candidate_sha256:
+        description: 'Erwartete SHA256 des Kandidaten-APK (fail closed)'
+        required: false
+        type: string
+      version_name:
+        description: 'Versionsname des Kandidaten'
+        required: false
+        type: string
+      version_code:
+        description: 'Versionscode des Kandidaten'
+        required: false
+        type: string
+      target_api:
+        description: 'Android-API-Level des Emulators'
+        required: false
+        type: string
+
+concurrency:
+  group: upgrade-${{ inputs.app }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REQUEST_ID: ${{ inputs.request_id }}
+  APP_ID: ${{ inputs.app }}
+  PACKAGE: ${{ inputs.package }}
+  COMMIT_SHA: ${{ inputs.commit_sha }}
+  BASELINE_APK: ${{ inputs.baseline_apk }}
+  CANDIDATE_APK: ${{ inputs.candidate_apk }}
+  SEED_SCRIPT: ${{ inputs.seed_script }}
+  VERSION_NAME: ${{ inputs.version_name }}
+  VERSION_CODE: ${{ inputs.version_code }}
+  MODE: upgrade
+
+jobs:
+  upgrade:
+    name: Upgrade ${{ inputs.baseline_apk }} -> ${{ inputs.candidate_apk }} auf API ${{ inputs.target_api }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Kontext protokollieren
+        run: |
+          echo "app=$APP_ID package=$PACKAGE baseline=$BASELINE_APK candidate=$CANDIDATE_APK commit=${COMMIT_SHA:0:12}"
+          echo "Kein Secret, keine URL und kein Artefaktinhalt wird ausgegeben."
+
+      - name: Baseline-APK von der privaten Bridge holen
+        env:
+          BRIDGE_URL: ${{ secrets.BRIDGE_URL }}
+          BRIDGE_TOKEN: ${{ secrets.BRIDGE_TOKEN }}
+          BUILD_ID: ${{ inputs.build_id }}
+          ARTIFACT_NAME: ${{ inputs.baseline_apk }}
+          ARTIFACT_SHA256: ${{ inputs.baseline_sha256 }}
+        run: ./scripts/fetch-artifact.sh
+
+      - name: Kandidaten-APK von der privaten Bridge holen
+        env:
+          BRIDGE_URL: ${{ secrets.BRIDGE_URL }}
+          BRIDGE_TOKEN: ${{ secrets.BRIDGE_TOKEN }}
+          BUILD_ID: ${{ inputs.build_id }}
+          ARTIFACT_NAME: ${{ inputs.candidate_apk }}
+          ARTIFACT_SHA256: ${{ inputs.candidate_sha256 }}
+        run: ./scripts/fetch-artifact.sh
+
+      - name: Seed-Skript von der privaten Bridge holen (denylist-geprueft)
+        env:
+          BRIDGE_URL: ${{ secrets.BRIDGE_URL }}
+          BRIDGE_TOKEN: ${{ secrets.BRIDGE_TOKEN }}
+          BUILD_ID: ${{ inputs.build_id }}
+          ARTIFACT_NAME: ${{ inputs.seed_script }}
+        run: |
+          ./scripts/fetch-artifact.sh
+          SCRIPT_PATH="${RUNNER_TEMP:-/tmp}/nectar-artifact/${ARTIFACT_NAME}"
+          # Fail-closed: Nur adb/sqlite3/python-stdlib-Skripte erlauben.
+          if grep -En 'curl |wget |nc |ssh |(rm|chmod|chown)[[:space:]]+(-[a-zA-Z]*[[:space:]]*)*/|/etc/|/Users/|base64[[:space:]]+-d|http[s]?://' "$SCRIPT_PATH" >/dev/null 2>&1; then
+            echo "ABGELEHNT: Seed-Skript enthaelt verbotene Muster"
+            exit 11
+          fi
+          chmod 644 "$SCRIPT_PATH"
+
+      - name: Ziel-API bestimmen
+        env:
+          REQUESTED_API: ${{ inputs.target_api }}
+        run: ./scripts/select-target-api.sh
+
+      - name: Emulator booten
+        run: ./scripts/boot-emulator.sh
+
+      - name: Upgrade-Test ausfuehren
+        run: ./scripts/run-upgrade.sh
+
+      - name: Ergebnis normalisieren
+        if: always()
+        run: |
+          MATRIX_JSON="[{\"api\":\"${TARGET_API:-${DEVICE_API:-unknown}}\",\"tag\":\"google_apis\",\"arch\":\"x86_64\",\"acceleration\":\"${ACCELERATION:-unknown}\"}]"
+          export MATRIX_JSON
+          BL=""
+          if [ -z "${DEVICE_API:-}" ]; then
+            VERDICT=INFRA_FAIL
+            BL="Emulator nicht bereit"
+          elif [ "${BASELINE_INSTALL_OK:-0}" != "1" ]; then
+            VERDICT=INFRA_FAIL
+            BL="Baseline-APK wurde nicht installiert"
+          elif [ "${SEED_OK:-0}" != "1" ]; then
+            VERDICT=INFRA_FAIL
+            BL="Nutzerdaten konnten nicht geseedet werden"
+          elif [ "${UPGRADE_INSTALL_OK:-0}" != "1" ]; then
+            VERDICT=FAIL
+            BL="Kandidaten-APK konnte nicht ohne Deinstallation installiert werden"
+          elif [ "${DATA_PRESERVED:-0}" != "1" ]; then
+            VERDICT=FAIL
+            BL="Nutzerdaten nach dem Upgrade beschädigt oder verloren"
+          elif [ "${CRASH_COUNT:-0}" -gt 0 ]; then
+            VERDICT=FAIL
+            BL="Absturz nach dem Upgrade"
+          else
+            VERDICT=PASS
+          fi
+          export VERDICT
+          [ -n "$BL" ] && export BLOCKER="$BL"
+          ./scripts/normalize-result.sh
+
+      - name: Ergebnis als Beleg sichern
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: upgrade-result-${{ inputs.app }}-${{ inputs.request_id }}
+          path: |
+            result.json
+            screenshots/**
+            logs/**
+          if-no-files-found: ignore
+          retention-days: 7
