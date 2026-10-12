@@ -161,7 +161,17 @@ jobs:
           echo "TARGET_API=$API" >> "$GITHUB_ENV"
 
       - name: Emulator booten
-        run: ./scripts/boot-emulator.sh
+        env:
+          TARGET_TAG: google_apis
+          TARGET_ARCH: x86_64
+        run: |
+          set -uo pipefail
+          TARGET_API="${TARGET_API:-34}" bash ./scripts/boot-emulator.sh || {
+            # Diagnostics
+            ls -la "$HOME/.android/avd" 2>&1 | head -5 || true
+            find "$HOME/.android" "$SDK" -maxdepth 4 -name 'nectar-api*.ini' 2>&1 | head -5 || true
+            exit 23
+          }
 
       - name: Upgrade-Test ausfuehren
         env:
