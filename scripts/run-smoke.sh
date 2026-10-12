@@ -160,7 +160,7 @@ fi
 if ! ADB="$ADB" "$(dirname "$0")/check-foreground.sh"; then
   SCREEN_STATE="blank"
 fi
-SYSTEM_ANR_COUNT=$(grep -c 'ANR in ' "$EV/logcat/full-logcat.txt" 2>/dev/null || true)
+SYSTEM_ANR_COUNT=$(grep -cE "ANR in ${PACKAGE}|am_crash.*${PACKAGE}" "$EV/logcat/full-logcat.txt" 2>/dev/null || true)
 SYSTEM_ANR_COUNT="${SYSTEM_ANR_COUNT:-0}"
 echo "SYSTEM_ANR_COUNT=$SYSTEM_ANR_COUNT" >> "$GITHUB_ENV"
 echo "SCREEN_STATE=$SCREEN_STATE" >> "$GITHUB_ENV"
