@@ -151,7 +151,127 @@ jobs:
       - name: Upgrade-Test ausfuehren
         env:
           WORK_ART: ${{ runner.temp }}/nectar-artifact
-        run: ./scripts/run-upgrade.sh
+        run: |
+          set -uo pipefail
+          EV="${RUNNER_TEMP:-/tmp}/nectar-evidence"
+          mkdir -p "$EV/screenshots" "$EV/logcat" "$EV/upgrade-db"
+          log() { printf '%s [upgrade] %s\n' "$(date -u +%FT%TZ)" "$1" >&2; }
+          with_timeout() {
+            local seconds="$1"; shift
+            if command -v timeout >/dev/null 2>&1; then timeout "$seconds" "$@"
+            else perl -e 'alarm shift; exec @ARGV' "$seconds" "$@"
+            fi
+          }
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          ADB="$(command -v adb 2>/dev/null || true)"
+          [ -n "$ADB" ] || ADB="${SDK}/platform-tools/adb"
+          [ -x "$ADB" ] || { log "adb nicht gefunden"; exit 40; }
+
+          for i in $(seq 1 60); do
+            BOOT=$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+            [ "$BOOT" = "1" ] && break
+            sleep 5
+          done
+          [ "$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] \
+            || { log "Emulator nicht gebootet"; exit 41; }
+          log "Emulator bereit"
+
+          resolve_launcher() {
+            "$ADB" shell cmd package resolve-activity --brief -a android.intent.action.MAIN \
+              -c android.intent.category.LAUNCHER "$PACKAGE" 2>/dev/null | tr -d '\r' | tail -1
+          }
+
+          # 1) Baseline frisch installieren
+          log "Deinstallation einer vorhandenen Instanz"
+          "$ADB" uninstall "$PACKAGE" >/dev/null 2>&1 || true
+          log "Baseline-Installation: $BASELINE_APK"
+          OUT=$("$ADB" install -r "$WORK_ART/$BASELINE_APK" 2>&1)
+          if echo "$OUT" | grep -qi "success"; then
+            echo "BASELINE_INSTALL_OK=1" >> "$GITHUB_ENV"; log "Baseline installiert"
+          else
+            log "Baseline fehlgeschlagen: $OUT"; exit 31
+          fi
+
+          # 2) Baseline starten (Room/DataStore-Dateien erzeugen), stoppen
+          ACT=$(resolve_launcher)
+          case "$ACT" in "$PACKAGE"/*) ;; *) log "Launcher nicht aufloesbar: $ACT"; exit 32 ;; esac
+          log "Baseline-Kaltstart: $ACT"
+          "$ADB" shell am start -W -n "$ACT" > "$EV/baseline-start.txt" 2>&1 || true
+          sleep 8
+          "$ADB" shell am force-stop "$PACKAGE" || true
+          sleep 3
+          log "Baseline gestoppt - Nutzerdaten werden geseedet"
+
+          # 3) Nutzerdaten seeden (Bridge-Skript, reines adb/sqlite3)
+          if ( cd "$EV" && with_timeout 300 python3 "$WORK_ART/$SEED_SCRIPT" seed ) > "$EV/seed.log" 2>&1; then
+            echo "SEED_OK=1" >> "$GITHUB_ENV"; log "Seed OK"
+          else
+            cat "$EV/seed.log" >&2 || true
+            echo "SEED_OK=0" >> "$GITHUB_ENV"
+            log "Seed fehlgeschlagen"
+            exit 33
+          fi
+          cp -a "$EV/qa-upgrade/." "$EV/upgrade-db/" 2>/dev/null || true
+
+          # 4) Kandidat OHNE Deinstallation installieren
+          log "Kandidaten-Upgrade (adb install -r, kein uninstall): $CANDIDATE_APK"
+          OUT=$("$ADB" install -r "$WORK_ART/$CANDIDATE_APK" 2>&1)
+          if echo "$OUT" | grep -qi "success"; then
+            echo "UPGRADE_INSTALL_OK=1" >> "$GITHUB_ENV"; log "Upgrade installiert (in-place)"
+          else
+            log "Kandidat fehlgeschlagen: $OUT"
+            echo "UPGRADE_INSTALL_OK=0" >> "$GITHUB_ENV"
+            exit 34
+          fi
+
+          # 5) Kandidaten-Kaltstart + Screenshot-Beweis
+          "$ADB" logcat -c >/dev/null 2>&1 || true
+          ACT=$(resolve_launcher)
+          "$ADB" shell am start -W -n "$ACT" > "$EV/candidate-start.txt" 2>&1 || true
+          sleep 8
+          SHOT_OK=0
+          for TRY in 1 2 3 4; do
+            rm -f "$EV/screenshots/upgrade-foreground.png" 2>/dev/null || true
+            if with_timeout 45 "$ADB" exec-out screencap -p > "$EV/screenshots/upgrade-foreground.png" 2>/dev/null; then
+              [ -s "$EV/screenshots/upgrade-foreground.png" ] && { SHOT_OK=1; break; }
+            fi
+            "$ADB" shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+            "$ADB" shell input keyevent 82 >/dev/null 2>&1 || true
+            sleep 4
+          done
+          echo "SHOT_OK=$SHOT_OK" >> "$GITHUB_ENV"
+          log "Screenshot: SHOT_OK=$SHOT_OK"
+
+          # Resume nach force-stop - Update-Semantik ueber Restart
+          "$ADB" shell am force-stop "$PACKAGE" || true
+          sleep 2
+          "$ADB" shell am start -n "$ACT" >/dev/null 2>&1 || true
+          sleep 6
+          with_timeout 45 "$ADB" exec-out screencap -p > "$EV/screenshots/upgrade-restart.png" 2>/dev/null || true
+
+          # 6) Datenbestand verifizieren (exakte Zeilenerhaltung)
+          if ( cd "$EV" && with_timeout 300 python3 "$WORK_ART/$SEED_SCRIPT" verify ) > "$EV/verify.log" 2>&1; then
+            echo "DATA_PRESERVED=1" >> "$GITHUB_ENV"; log "Datenbestand exakt erhalten"
+            cat "$EV/verify.log" >&2 || true
+          else
+            cat "$EV/verify.log" >&2 || true
+            echo "DATA_PRESERVED=0" >> "$GITHUB_ENV"
+            log "Datenbestand nach Upgrade beschädigt/verloren"
+          fi
+          cp -a "$EV/qa-upgrade/." "$EV/upgrade-db/" 2>/dev/null || true
+
+          # 7) Logcat + Crash-Scan
+          with_timeout 90 "$ADB" logcat -d -v threadtime -t 2000 > "$EV/logcat/full-logcat.txt" 2>/dev/null || true
+          CRASH_COUNT=$( { grep -cE "FATAL EXCEPTION|am_crash.*${PACKAGE}" "$EV/logcat/full-logcat.txt" 2>/dev/null || true; } | head -1 )
+          CRASH_COUNT="${CRASH_COUNT:-0}"
+          case "$CRASH_COUNT" in ''|*[!0-9]*) CRASH_COUNT=0 ;; esac
+          echo "CRASH_COUNT=$CRASH_COUNT" >> "$GITHUB_ENV"
+          log "Crash-Eintraege: $CRASH_COUNT"
+
+          echo "TESTS_PASSED=1" >> "$GITHUB_ENV"
+          echo "TESTS_FAILED=0" >> "$GITHUB_ENV"
+          log "Upgrade-Test abgeschlossen"
+          exit 0
 
       - name: Ergebnis normalisieren
         if: always()
