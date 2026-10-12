@@ -145,10 +145,22 @@ jobs:
           fi
           chmod 644 "$SCRIPT_PATH"
 
-      - name: Ziel-API bestimmen
+      - name: Ziel-API bestimmen (inline, Kandidat als Referenz)
         env:
           REQUESTED_API: ${{ inputs.target_api }}
-        run: ./scripts/select-target-api.sh
+          CAND_PATH: ${{ runner.temp }}/nectar-artifact/${{ inputs.candidate_apk }}
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          AAPT=$(find "$SDK/build-tools" -maxdepth 2 \( -name aapt -o -name aapt2 \) -type f | sort -V | tail -1)
+          BADGING=$("$AAPT" dump badging "$CAND_PATH")
+          MIN=$(sed -n "s/^sdkVersion:'\([0-9]*\)'.*/\1/p" <<< "$BADGING" | head -1)
+          TARGET=$(sed -n "s/^targetSdkVersion:'\([0-9]*\)'.*/\1/p" <<< "$BADGING" | head -1)
+          [[ "$MIN" =~ ^[0-9]+$ ]] || { echo "SDK-Metadaten fehlen" >&2; exit 1; }
+          API="${REQUESTED_API:-34}"
+          [ "$API" -ge "$MIN" ] || { echo "API $API unter minSdk $MIN" >&2; exit 1; }
+          printf 'Kandidat minSdk=%s targetSdk=%s; Emulator API=%s\n' "$MIN" "$TARGET" "$API"
+          echo "TARGET_API=$API" >> "$GITHUB_ENV"
 
       - name: Emulator booten
         run: ./scripts/boot-emulator.sh
