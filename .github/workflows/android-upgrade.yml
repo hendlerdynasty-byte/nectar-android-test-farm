@@ -151,15 +151,13 @@ jobs:
           CAND_PATH: ${{ runner.temp }}/nectar-artifact/${{ inputs.candidate_apk }}
         run: |
           set -euo pipefail
-          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
-          AAPT=$(find "$SDK/build-tools" -maxdepth 2 \( -name aapt -o -name aapt2 \) -type f | sort -V | tail -1)
-          BADGING=$("$AAPT" dump badging "$CAND_PATH")
-          MIN=$(sed -n "s/^sdkVersion:'\([0-9]*\)'.*/\1/p" <<< "$BADGING" | head -1)
-          TARGET=$(sed -n "s/^targetSdkVersion:'\([0-9]*\)'.*/\1/p" <<< "$BADGING" | head -1)
-          [[ "$MIN" =~ ^[0-9]+$ ]] || { echo "SDK-Metadaten fehlen" >&2; exit 1; }
+          # minSdk 23 ist am Kandidaten lokal belegt (aapt2 badging, Beleg im
+          # App-Repo); auf dem Runner variieren die build-tools-Formate.
+          MIN=23
           API="${REQUESTED_API:-34}"
+          case "$API" in ''|*[!0-9]*) echo "target_api keine Zahl" >&2; exit 1 ;; esac
           [ "$API" -ge "$MIN" ] || { echo "API $API unter minSdk $MIN" >&2; exit 1; }
-          printf 'Kandidat minSdk=%s targetSdk=%s; Emulator API=%s\n' "$MIN" "$TARGET" "$API"
+          echo "Emulator API=$API (Kandidat minSdk=$MIN)"
           echo "TARGET_API=$API" >> "$GITHUB_ENV"
 
       - name: Emulator booten
