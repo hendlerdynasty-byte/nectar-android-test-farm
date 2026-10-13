@@ -1,27 +1,35 @@
 name: android-upgrade-vinylbase
 
-# In-Place-Upgrade-Regression für VinylBase (app.vinylbase.local) — SESSION-VINYLBASE-01.
+# In-Place-Upgrade-Regression für VinylBase (app.vinylbase.local) — SESSION-VINYLBASE-01, v2.
 #
-# Anders als android-upgrade.yml (PlayBoard, Room-DB) nutzt VinylBase SharedPreferences:
-# `shared_prefs/vinylbase_prefs.xml`, Key `records_json`, URL-encoded Records mit
-# `|`-Trennung. Der Seed ist der ECHTE First-Run-Pfad der App (Demo-Einträge
-# Pink Floyd / Miles Davis / Daft Punk via catalog.add + persist in onCreate).
+# v2 (Director-Review #3): ECHTE UI-Assertions statt Soft-Gate.
+#   1. Baseline installieren; Onboarding wird DURCH UI-TAPS ABGESCHLOSSEN
+#      (btn_skip via resource-id; onboarding_done wird dadurch von der App
+#      selbst gesetzt — kein synthetischer Prefs-Write).
+#   2. Drei eigene Datensätze über die echte Add-Dialog-UI anlegen
+#      (fab -> et_artist/et_album -> "Hinzufügen"), einer davon NACH dem
+#      Anlegen über Langdruck -> "Bearbeiten" GEÄNDERT.
+#   3. Prefs-Snapshot via adb root (nur lesen): 3 Demo- + 3 Nutzer-Records,
+#      der geänderte Künstlerwert muss im Persistenzstring stehen.
+#   4. Export-Inhaltsprobe: btn_export_csv -> Share-Sheet nur dismiss (BACK);
+#      die Cache-Datei cache/exports/vinylbase_sammlung.csv wird via root
+#      gelesen und gegen die erwarteten Inhalte geprüft (echter Export-
+#      Content-Beweis ohne Share-Ziel-Abhängigkeit).
+#   5. Import: CSV nach /sdcard/Download pushen, btn_import_csv -> SAF-
+#      DocumentsUI (Filename-Tap) -> Import-Record-Assertion.
+#   6. Kandidat OHNE Deinstallation drüber; Kaltstart.
+#   7. Post-Upgrade-Assertions (HARTE Gates):
+#      - Onboarding darf NICHT erscheinen (onboarding_done überlebt Upgrade)
+#      - alle 6 Datensätze in der Liste gerendert (Demo 3 + Nutzer 3)
+#      - Suche: "TestAlbumZwei" eingeben -> zugehöriger Künstler sichtbar,
+#        andere Records gefiltert
+#      - geänderter Wert "TestKuenstler1EDITIERT" weiterhin sichtbar
+#      - Kaltstart erneut -> Daten weiterhin da
+#      - Prefs-IDs byte-genau erhalten, Crash-Scan 0
 #
-# Ablauf:
-#   1. Baseline (produktions-signiertes Alt-Artefakt, vC8/1.2.2) installieren,
-#      Kaltstart -> App schreibt ihre echten First-Run-Daten selbst.
-#   2. Prefs-Snapshot via run-as (lesen, nie schreiben).
-#   3. Kandidat OHNE Deinstallation drüber installieren (adb install -r;
-#      Signierungskompatibilität ist fail-closed durch die APK-Signatur selbst).
-#   4. Kandidaten-Kaltstart -> decodeRecords-Migration mit getOrElse-Defaults.
-#   5. Migration-Nachweis: Record-IDs im Prefs-File UNVERÄNDERT (ein Fallback-
-#      Re-Seed würde neue UUIDs schreiben), UI-Renderproof via uiautomator,
-#      logcat ohne FATAL EXCEPTION.
-#
-# Datenschutz-Eigenschaften (wie android-upgrade.yml):
-#   * Die Farm klont NIEMALS das private App-Repository; nur opake Build-IDs.
-#   * Baseline- und Kandidaten-APK kommen pro Lauf von der privaten Bridge.
-#   * Kein synthetisches Schema, kein direkter Insert: die App schreibt selbst.
+# Datenschutz-Eigenschaften: die Farm klont niemals Quellcode; nur opake
+# Build-IDs; kein Seed-Skript, kein synthetischer Prefs-Write — alle Daten
+# entstehen durch die App selbst über ihre Produktions-UI/DAOs.
 
 on:
   workflow_dispatch:
@@ -95,20 +103,15 @@ env:
 
 jobs:
   upgrade-vinylbase:
-    name: Upgrade ${{ inputs.baseline_apk }} -> ${{ inputs.candidate_apk }} auf API ${{ inputs.target_api }}
+    name: "Upgrade mit UI-Assertions: ${{ inputs.baseline_apk }} -> ${{ inputs.candidate_apk }} (API ${{ inputs.target_api }})"
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 75
 
     steps:
       - name: Repository auschecken
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-
-      - name: Kontext protokollieren
-        run: |
-          echo "app=$APP_ID package=$PACKAGE baseline=$BASELINE_APK candidate=$CANDIDATE_APK commit=${COMMIT_SHA:0:12}"
-          echo "VinylBase-Seeding via echtem First-Run-Pfad (Demo-Einträge durch catalog.add+persist)"
 
       - name: Baseline-APK von der privaten Bridge holen
         env:
@@ -135,8 +138,7 @@ jobs:
           set -euo pipefail
           EV="${RUNNER_TEMP:-/tmp}/nectar-evidence"
           mkdir -p "$EV"
-          shasum -a 256 "$WORK_ART/$BASELINE_APK" "$WORK_ART/$CANDIDATE_APK" \
-            | tee "$EV/artefact-sha256.txt"
+          shasum -a 256 "$WORK_ART/$BASELINE_APK" "$WORK_ART/$CANDIDATE_APK" | tee "$EV/artefact-sha256.txt"
           test -s "$WORK_ART/$BASELINE_APK" || { echo "Baseline-APK leer"; exit 31; }
           test -s "$WORK_ART/$CANDIDATE_APK" || { echo "Kandidaten-APK leer"; exit 31; }
 
@@ -163,14 +165,14 @@ jobs:
             exit 23
           }
 
-      - name: Upgrade-Test ausfuehren (VinylBase SharedPreferences)
+      - name: Upgrade-Test mit UI-Assertions
         env:
           WORK_ART: ${{ runner.temp }}/nectar-artifact
         run: |
           set -uo pipefail
           EV="${RUNNER_TEMP:-/tmp}/nectar-evidence"
-          mkdir -p "$EV/screenshots" "$EV/logcat" "$EV/upgrade-prefs"
-          log() { printf '%s [upgrade-vinylbase] %s\n' "$(date -u +%FT%TZ)" "$1" >&2; }
+          mkdir -p "$EV/screenshots" "$EV/logcat" "$EV/upgrade-prefs" "$EV/ui-dumps"
+          log() { printf '%s [upgrade-v2] %s\n' "$(date -u +%FT%TZ)" "$1" >&2; }
           with_timeout() {
             local seconds="$1"; shift
             if command -v timeout >/dev/null 2>&1; then timeout "$seconds" "$@"
@@ -182,8 +184,7 @@ jobs:
           [ -n "$ADB" ] || ADB="${SDK}/platform-tools/adb"
           [ -x "$ADB" ] || { log "adb nicht gefunden"; exit 40; }
 
-          # Release-APKs sind nicht debuggable -> run-as schlaegt fehl.
-          # google_apis-Emulator-Images erlauben adb root -> direkter Dateizugriff.
+          # Release-APKs sind nicht debuggable -> adb root (nur-lesen auf App-Daten)
           "$ADB" root >/dev/null 2>&1 || true
           sleep 3
           "$ADB" wait-for-device >/dev/null 2>&1 || true
@@ -196,202 +197,305 @@ jobs:
             || { log "Emulator nicht gebootet"; exit 41; }
           log "Emulator bereit"
 
+          # ---------- UI-Automation-Helfer (resource-id-basiert, mit Retry) ----------
+          PKG_RES="com.hendlerdynasty.vinylbase"
+          UIDUMP_N=0
+          dump_ui() {
+            UIDUMP_N=$((UIDUMP_N+1))
+            with_timeout 30 "$ADB" shell uiautomator dump /sdcard/uidump.xml >/dev/null 2>&1 || true
+            "$ADB" shell cat /sdcard/uidump.xml > "$EV/ui-dumps/uidump-$UIDUMP_N.xml" 2>/dev/null || true
+            [ -s "$EV/ui-dumps/uidump-$UIDUMP_N.xml" ]
+          }
+          find_bounds() {
+            local key="$1" raw coords x1 y1 x2 y2
+            [ -s "$EV/ui-dumps/uidump-$UIDUMP_N.xml" ] || return 1
+            raw=$(grep -oE "(resource-id=\"$PKG_RES:id/$key\"|text=\"$key\")[^>]*bounds=\"\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]\"" \
+                    "$EV/ui-dumps/uidump-$UIDUMP_N.xml" 2>/dev/null | head -1)
+            [ -n "$raw" ] || return 1
+            coords=$(printf '%s' "$raw" | sed -E 's/.*bounds="\[([0-9]+),([0-9]+)\]\[([0-9]+),([0-9]+)\]".*/\1 \2 \3 \4/')
+            set -- $coords
+            x1=$1; y1=$2; x2=$3; y2=$4
+            [ "$x2" -gt "$x1" ] && [ "$y2" -gt "$y1" ] || return 1
+            echo "$(( (x1 + x2) / 2 )) $(( (y1 + y2) / 2 ))"
+          }
+          tap_ui() {
+            local key="$1" tries="${2:-4}" c
+            for t in $(seq 1 "$tries"); do
+              dump_ui && c=$(find_bounds "$key") && [ -n "$c" ] && {
+                "$ADB" shell input tap $c >/dev/null 2>&1
+                log "tap $key -> $c (Try $t)"
+                sleep 2
+                return 0
+              }
+              sleep 3
+            done
+            log "NICHT GEFUNDEN: $key"
+            return 1
+          }
+          type_into() {
+            local key="$1" text="$2"
+            tap_ui "$key" 5 || return 1
+            sleep 1
+            "$ADB" shell input text "$text" >/dev/null 2>&1
+            sleep 1
+            return 0
+          }
+          ui_contains() {
+            grep -q -- "$1" "$EV/ui-dumps/uidump-$UIDUMP_N.xml" 2>/dev/null
+          }
           resolve_launcher() {
             "$ADB" shell cmd package resolve-activity --brief -a android.intent.action.MAIN \
               -c android.intent.category.LAUNCHER "$PACKAGE" 2>/dev/null | tr -d '\r' | tail -1
           }
+          cold_start() {
+            "$ADB" shell am force-stop "$PACKAGE" || true
+            sleep 2
+            "$ADB" shell am start -W -n "$(resolve_launcher)" > "$EV/start-$1.txt" 2>&1 || true
+            sleep 6
+          }
+          read_prefs() {
+            "$ADB" exec-out cat "/data/data/$PACKAGE/shared_prefs/vinylbase_prefs.xml" > "$1" 2>/dev/null
+            grep -q "records_json" "$1"
+          }
+          longpress_record() {
+            local c
+            dump_ui || return 1
+            c=$(find_bounds "$1") || return 1
+            [ -n "$c" ] || return 1
+            set -- $c
+            "$ADB" shell input swipe "$1" "$2" "$1" "$2" 1400 >/dev/null 2>&1
+            sleep 2
+            return 0
+          }
 
-          PREFS_FILE="shared_prefs/vinylbase_prefs.xml"
-
-          # 1) Baseline frisch installieren
+          # ================= 1) BASELINE INSTALLIEREN + EINRICHTEN =================
           "$ADB" uninstall "$PACKAGE" >/dev/null 2>&1 || true
           log "Baseline-Installation: $BASELINE_APK"
           OUT=$("$ADB" install -r "$WORK_ART/$BASELINE_APK" 2>&1)
-          if echo "$OUT" | grep -qi "success"; then
-            echo "BASELINE_INSTALL_OK=1" >> "$GITHUB_ENV"; log "Baseline installiert"
-          else
-            log "Baseline fehlgeschlagen: $OUT"; exit 31
-          fi
+          echo "$OUT" | grep -qi "success" || { log "Baseline fehlgeschlagen: $OUT"; exit 31; }
+          log "Baseline installiert"
+          echo "BASELINE_INSTALL_OK=1" >> "$GITHUB_ENV"
 
-          # 2) Baseline-Kaltstart -> App legt ECHTE First-Run-Daten an
-          #    (onCreate: savedRaw blank -> 3 Demo-Einträge + persist()).
           ACT=$(resolve_launcher)
           case "$ACT" in "$PACKAGE"/*) ;; *) log "Launcher nicht auflösbar: $ACT"; exit 32 ;; esac
-          log "Baseline-Kaltstart: $ACT"
           "$ADB" shell am start -W -n "$ACT" > "$EV/baseline-start.txt" 2>&1 || true
           sleep 8
 
-          # 3) Prefs-Snapshot (nur lesen) + Seed-Sanity
+          # ---------- 2) ONBOARDING DURCH UI ABSCHLIESSEN (harte Pflicht) ----------
+          if tap_ui "btn_skip" 6; then
+            log "Onboarding per UI abgeschlossen (btn_skip -> onboarding_done durch App)"
+            sleep 4
+          else
+            dump_ui || { log "UI-Dump nach Start fehlgeschlagen"; exit 33; }
+            if ui_contains "recycler"; then
+              log "Kein Onboarding (bereits eingerichtet) — fortfahren"
+            else
+              log "Weder Onboarding noch Liste sichtbar"; exit 33
+            fi
+          fi
+          echo "SEED_OK=1" >> "$GITHUB_ENV"
+
+          # ---------- 3) DREI NUTZER-DATENSÄTZE ÜBER DIE UI ANLEGEN ----------
+          add_record() {
+            tap_ui "fab" 6 || return 1
+            sleep 2
+            type_into "et_artist" "$1" || return 1
+            type_into "et_album" "$2" || return 1
+            tap_ui "Hinzufügen" 6 || return 1
+            sleep 3
+            dump_ui || return 1
+            ui_contains "$2" || { log "Record $2 nach Anlegen nicht in Liste"; return 1; }
+            return 0
+          }
+          add_record "TestKuenstler1" "TestAlbumEins" || { log "Anlegen Record 1 fehlgeschlagen"; exit 50; }
+          log "Record 1 angelegt"
+          add_record "TestKuenstler2" "TestAlbumZwei" || { log "Anlegen Record 2 fehlgeschlagen"; exit 50; }
+          log "Record 2 angelegt"
+          add_record "TestKuenstler3" "TestAlbumDrei" || { log "Anlegen Record 3 fehlgeschlagen"; exit 50; }
+          log "Record 3 angelegt"
+
+          # ---------- 4) RECORD 1 ÜBER DIE UI BEARBEITEN ----------
+          longpress_record "TestAlbumEins" || { log "Langdruck auf Record 1 fehlgeschlagen"; exit 51; }
+          tap_ui "Bearbeiten" 6 || { log "Bearbeiten-Option nicht gefunden"; exit 51; }
+          sleep 2
+          tap_ui "et_artist" 6 || { log "et_artist im Bearbeiten-Dialog nicht gefunden"; exit 51; }
+          for k in $(seq 1 13); do "$ADB" shell input keyevent 67 >/dev/null 2>&1; done
+          "$ADB" shell input text "TestKuenstler1EDITIERT" >/dev/null 2>&1
+          tap_ui "Hinzufügen" 6 || { log "Speichern (Hinzufügen) im Bearbeiten-Dialog nicht gefunden"; exit 51; }
+          sleep 3
+          dump_ui || { log "Dump nach Bearbeitung fehlgeschlagen"; exit 51; }
+          ui_contains "TestKuenstler1EDITIERT" || { log "Geänderter Wert nicht in Liste"; exit 51; }
+          log "Record 1 bearbeitet -> TestKuenstler1EDITIERT (UI bestätigt)"
+
+          # ---------- 5) BASELINE-PREFS-SNAPSHOT (nur lesen) ----------
           "$ADB" shell am force-stop "$PACKAGE" || true
           sleep 2
-          if ! $ADB exec-out cat "/data/data/$PACKAGE/$PREFS_FILE" \
-              > "$EV/upgrade-prefs/baseline-prefs.xml" 2>"$EV/upgrade-prefs/baseline-prefs.err" \
-              || ! grep -q "records_json" "$EV/upgrade-prefs/baseline-prefs.xml"; then
-            log "Baseline-Prefs nicht angelegt (First-Run-Persist fehlgeschlagen)"
-            cat "$EV/upgrade-prefs/baseline-prefs.err" >&2 || true
-            cat "$EV/baseline-start.txt" >&2 || true
-            exit 35
-          fi
-          # Demo-Sanity: Mindestens 2 der 3 Demo-Einträge müssen im Records-String stehen
-          DEMO_HITS=0
-          for n in "Pink+Floyd" "Miles+Davis" "Daft+Punk"; do
-            grep -q "$n" "$EV/upgrade-prefs/baseline-prefs.xml" && DEMO_HITS=$((DEMO_HITS+1))
-          done
-          log "Demo-Seed-Treffer in Baseline-Prefs: $DEMO_HITS/3"
-          [ "$DEMO_HITS" -ge 2 ] || { log "Baseline-Seed unvollständig"; exit 35; }
-          # Record-IDs extrahieren (UUID v4-Muster im URL-encoded Records-String)
+          read_prefs "$EV/upgrade-prefs/baseline-prefs.xml" \
+            || { log "Baseline-Prefs nicht lesbar"; exit 35; }
+          grep -q "TestKuenstler1EDITIERT" "$EV/upgrade-prefs/baseline-prefs.xml" \
+            || { log "Geänderter Wert fehlt im Persistenzstring"; exit 35; }
           grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
             "$EV/upgrade-prefs/baseline-prefs.xml" | sort > "$EV/upgrade-prefs/baseline-ids.txt"
           IDS_BASELINE=$(wc -l < "$EV/upgrade-prefs/baseline-ids.txt" | tr -d ' ')
-          log "Baseline-Record-IDs: $IDS_BASELINE"
-          [ "$IDS_BASELINE" -ge 3 ] || { log "Zu wenige Records im Baseline-Bestand"; exit 35; }
+          log "Baseline-IDs: $IDS_BASELINE (6 erwartet: 3 Demo + 3 Nutzer)"
+          [ "$IDS_BASELINE" -ge 6 ] || { log "Zu wenige Records vor Upgrade"; exit 35; }
 
-          # 4) Kandidat OHNE Deinstallation installieren (in-place)
-          log "Kandidaten-Upgrade (adb install -r, kein uninstall): $CANDIDATE_APK"
-          OUT=$("$ADB" install -r "$WORK_ART/$CANDIDATE_APK" 2>&1)
-          if echo "$OUT" | grep -qi "success"; then
-            echo "UPGRADE_INSTALL_OK=1" >> "$GITHUB_ENV"; log "Upgrade installiert (in-place)"
-          else
-            log "Kandidat fehlgeschlagen: $OUT"
-            echo "UPGRADE_INSTALL_OK=0" >> "$GITHUB_ENV"
-            exit 34
-          fi
-
-          # 5) Kandidaten-Kaltstart -> decodeRecords-Migration
-          "$ADB" logcat -c >/dev/null 2>&1 || true
-          "$ADB" shell am start -W -n "$ACT" > "$EV/candidate-start.txt" 2>&1 || true
-          sleep 8
-
-          # 6) Migration-Nachweis: IDs UNVERÄNDERT (Fallback-Re-Seed würde neue
-          #    UUIDs schreiben); UI-Renderproof via uiautomator dump.
-          "$ADB" shell am force-stop "$PACKAGE" || true
+          # ---------- 6) EXPORT-INHALTSPROBE (echter CSV-Content) ----------
+          tap_ui "btn_export_csv" 5 || { log "Export-Button nicht gefunden"; exit 52; }
+          sleep 4
+          "$ADB" shell input keyevent 4 >/dev/null 2>&1
           sleep 2
-          if ! $ADB exec-out cat "/data/data/$PACKAGE/$PREFS_FILE" \
-              > "$EV/upgrade-prefs/after-prefs.xml" 2>"$EV/upgrade-prefs/after-prefs.err" \
-              || ! grep -q "records_json" "$EV/upgrade-prefs/after-prefs.xml"; then
-            log "After-Prefs nicht lesbar"
-            cat "$EV/upgrade-prefs/after-prefs.err" >&2 || true
-            exit 39
+          "$ADB" exec-out cat "/data/data/$PACKAGE/cache/exports/vinylbase_sammlung.csv" \
+            > "$EV/upgrade-prefs/baseline-export.csv" 2>/dev/null || true
+          grep -q "TestKuenstler1EDITIERT" "$EV/upgrade-prefs/baseline-export.csv" \
+            && grep -q "TestAlbumZwei" "$EV/upgrade-prefs/baseline-export.csv" \
+            || { log "Export-CSV enthält erwartete Inhalte nicht"; exit 52; }
+          log "Export-Content verifiziert (echte Cache-CSV mit geändertem Wert)"
+
+          # ---------- 7) IMPORT-VORBEREITUNG ----------
+          {
+            printf 'ID,Künstler,Album,Jahr,Genre,Zustand,Format,Geschwindigkeit,Label,Notizen,Katalognummer\n'
+            printf '"import-id-001","ImportKuenstler","ImportAlbumTest","1999","Rock","Mint","12"""" LP","33 ⅓ RPM","TestLabel","Importzeile","X-001"\n'
+          } > /tmp/vinylbase-import.csv
+          "$ADB" push /tmp/vinylbase-import.csv /sdcard/Download/vinylbase-import.csv >/dev/null 2>&1 \
+            || { log "CSV-Push fehlgeschlagen"; exit 53; }
+          log "Import-CSV bereit in /sdcard/Download"
+
+          # ================= 8) IN-PLACE-UPGRADE (kein uninstall) =================
+          log "Kandidaten-Upgrade (adb install -r): $CANDIDATE_APK"
+          OUT=$("$ADB" install -r "$WORK_ART/$CANDIDATE_APK" 2>&1)
+          echo "$OUT" | grep -qi "success" || { log "Kandidat fehlgeschlagen: $OUT"; exit 34; }
+          echo "UPGRADE_INSTALL_OK=1" >> "$GITHUB_ENV"
+          log "Upgrade installiert (in-place)"
+
+          # ---------- 9) POST-UPGRADE-ASSERTIONS ----------
+          "$ADB" logcat -c >/dev/null 2>&1 || true
+          cold_start "candidate-1"
+          dump_ui || { log "Dump nach Upgrade fehlgeschlagen"; exit 60; }
+
+          if ui_contains "onboarding_skip"; then
+            log "FAIL: Onboarding nach Upgrade sichtbar (onboarding_done ging verloren)"
+            exit 60
           fi
+          log "PASS: Onboarding nach Upgrade nicht sichtbar"
+
+          MISS=0
+          for n in "TestKuenstler1EDITIERT" "TestAlbumZwei" "TestAlbumDrei" "Kind of Blue" "Autobahn" "Discovery"; do
+            ui_contains "$n" || { log "FAIL: '$n' nach Upgrade nicht in Liste"; MISS=1; }
+          done
+          [ "$MISS" = "0" ] || exit 60
+          log "PASS: alle 6 Datensätze nach Upgrade gerendert"
+
+          tap_ui "search_input" 6 || { log "Suchfeld nicht gefunden"; exit 61; }
+          "$ADB" shell input text "TestAlbumZwei" >/dev/null 2>&1
+          sleep 3
+          dump_ui || { log "Dump nach Suche fehlgeschlagen"; exit 61; }
+          ui_contains "TestKuenstler2" || { log "FAIL: Suche liefert Record 2 nicht"; exit 61; }
+          if ui_contains "TestAlbumDrei"; then
+            log "FAIL: Suche filtert nicht (Record 3 noch sichtbar)"; exit 61
+          fi
+          log "PASS: Suche filtert korrekt nach Upgrade"
+          for k in $(seq 1 20); do "$ADB" shell input keyevent 67 >/dev/null 2>&1; done
+          "$ADB" shell input keyevent 111 >/dev/null 2>&1
+
+          tap_ui "btn_import_csv" 5 || { log "Import-Button nicht gefunden"; exit 62; }
+          sleep 5
+          tap_ui "vinylbase-import.csv" 8 || { log "Import-Datei im SAF-Picker nicht gefunden"; exit 62; }
+          sleep 5
+          cold_start "candidate-2"
+          "$ADB" exec-out cat "/data/data/$PACKAGE/shared_prefs/vinylbase_prefs.xml" \
+            > "$EV/upgrade-prefs/after-import-prefs.xml" 2>/dev/null || true
+          grep -q "ImportKuenstler" "$EV/upgrade-prefs/after-import-prefs.xml" \
+            || { log "FAIL: importierter Record nicht im Bestand"; exit 62; }
+          log "PASS: CSV-Import über echte SAF-Auswahl erfolgreich"
+
+          read_prefs "$EV/upgrade-prefs/after-prefs.xml" || { log "After-Prefs nicht lesbar"; exit 63; }
           grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
             "$EV/upgrade-prefs/after-prefs.xml" | sort > "$EV/upgrade-prefs/after-ids.txt"
           if diff -u "$EV/upgrade-prefs/baseline-ids.txt" "$EV/upgrade-prefs/after-ids.txt" \
               > "$EV/upgrade-prefs/diff-ids.txt" 2>/dev/null; then
-            echo "DATA_PRESERVED_IDS=1" >> "$GITHUB_ENV"
-            log "Record-IDs byte-genau erhalten (kein Fallback-Re-Seed)"
+            log "PASS: Record-IDs byte-genau erhalten"
           else
-            echo "DATA_PRESERVED_IDS=0" >> "$GITHUB_ENV"
-            log "Record-IDs verändert — Migration hat Bestand neu geseedet oder verloren"
-            cat "$EV/upgrade-prefs/diff-ids.txt" >&2 || true
+            log "FAIL: Record-IDs verändert"
+            exit 63
           fi
+          grep -q "TestKuenstler1EDITIERT" "$EV/upgrade-prefs/after-prefs.xml" \
+            || { log "FAIL: geänderter Wert nach Upgrade verloren"; exit 63; }
+          cold_start "candidate-3"
+          dump_ui || { log "Dump nach Kaltstart fehlgeschlagen"; exit 64; }
+          ui_contains "TestAlbumZwei" || { log "FAIL: Daten nach Kaltstart verloren"; exit 64; }
+          log "PASS: Datenbestand überlebt Kaltstart nach Upgrade"
 
-          # UI-Renderproof: Liste muss migrierte Records zeigen.
-          # uiautomator dump hat auf Emulatoren bekannte UiAutomation-Connect-
-          # Timeouts (LL-011-Klasse: Test-Flake, kein Produktdefekt) -> Retry.
-          UI_OK=0
-          for DUMP_TRY in 1 2 3; do
-            rm -f /sdcard/uidump.xml 2>/dev/null || true
-            with_timeout 30 "$ADB" shell uiautomator dump /sdcard/uidump.xml >/dev/null 2>&1 || true
-            $ADB shell cat /sdcard/uidump.xml > "$EV/screenshots/upgrade-uidump.xml" 2>/dev/null || true
-            [ -s "$EV/screenshots/upgrade-uidump.xml" ] && break
-            sleep 6
-          done
-          # Renderproof als SOFT-Gate: Ohne UI-Durchklicken der Baseline bleibt
-          # onboarding_done gesetzt nie; der Kandidat zeigt dann zunaechst das
-          # Onboarding statt der Liste, und der uiautomator-Dump ist auf
-          # Emulatoren zudem flakey (UiAutomation-Timeout, LL-011-Klasse).
-          # Der List-Render des migrierten Bestands ist am selben Kandidaten-
-          # APK durch den Smoke-Robo-Lauf (39/39 Aktionen, 20 Screenshots,
-          # matrix-220gkwqbqyy0e) belegt. Harte Gates: Seed, In-Place-Install,
-          # ID-Erhalt, 0 App-Crashes.
-          if [ -s "$EV/screenshots/upgrade-uidump.xml" ]; then
-            UI_HITS=0
-            for n in "Kind of Blue" "Autobahn" "Discovery"; do
-              grep -q "$n" "$EV/screenshots/upgrade-uidump.xml" && UI_HITS=$((UI_HITS+1))
-            done
-            log "UI-Renderproof-Treffer: $UI_HITS/3 (soft-gate, s. Kommentar)"
-            [ "$UI_HITS" -ge 2 ] && UI_OK=1
-          fi
-          echo "UI_RENDER_OK=$UI_OK" >> "$GITHUB_ENV"
-
-          # 7) Screenshot-Beweis
-          SHOT_OK=0
+          # ---------- 10) Screenshot + Crash-Scan ----------
           for TRY in 1 2 3; do
             if with_timeout 45 "$ADB" exec-out screencap -p > "$EV/screenshots/upgrade-foreground.png" 2>/dev/null; then
-              [ -s "$EV/screenshots/upgrade-foreground.png" ] && { SHOT_OK=1; break; }
+              [ -s "$EV/screenshots/upgrade-foreground.png" ] && break
             fi
-            "$ADB" shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
             sleep 4
           done
-          echo "SHOT_OK=$SHOT_OK" >> "$GITHUB_ENV"
-
-          # 8) Logcat + Crash-Scan
-          with_timeout 90 "$ADB" logcat -d -v threadtime -t 2000 > "$EV/logcat/full-logcat.txt" 2>/dev/null || true
-          # App-Crash-Scan: nur am_crash des Pakets UND FATAL EXCEPTION, die
-          # NICHT vom uiautomator-Shell-Kommando stammt (DumpCommand-Crash bei
-          # UiAutomation-Timeout ist Testinfrastruktur, nicht die App).
+          with_timeout 90 "$ADB" logcat -d -v threadtime -t 3000 > "$EV/logcat/full-logcat.txt" 2>/dev/null || true
           APP_CRASHES=$(grep -cE "am_crash.*${PACKAGE}" "$EV/logcat/full-logcat.txt" 2>/dev/null || echo 0)
           OTHER_FATALS=$(grep "FATAL EXCEPTION" "$EV/logcat/full-logcat.txt" 2>/dev/null | grep -cv "uiautomator" || echo 0)
           CRASH_COUNT=$(( ${APP_CRASHES:-0} + ${OTHER_FATALS:-0} ))
-          CRASH_COUNT="${CRASH_COUNT:-0}"
-          case "$CRASH_COUNT" in ''|*[!0-9]*) CRASH_COUNT=0 ;; esac
           echo "CRASH_COUNT=$CRASH_COUNT" >> "$GITHUB_ENV"
           log "Crash-Einträge: $CRASH_COUNT"
+          [ "$CRASH_COUNT" = "0" ] || { log "FAIL: App-Crash nach Upgrade"; exit 65; }
 
           echo "TESTS_PASSED=1" >> "$GITHUB_ENV"
           echo "TESTS_FAILED=0" >> "$GITHUB_ENV"
-          log "VinylBase-Upgrade-Test abgeschlossen"
+          log "VinylBase-Upgrade-Test v2 (UI-Assertions) abgeschlossen"
           exit 0
 
       - name: Verdict
         if: always()
         run: |
+          EV="${RUNNER_TEMP:-/tmp}/nectar-evidence"
           if [ -z "${DEVICE_API:-}" ]; then
             VERDICT=INFRA_FAIL; BL="Emulator nicht bereit"
           elif [ "${BASELINE_INSTALL_OK:-0}" != "1" ]; then
             VERDICT=INFRA_FAIL; BL="Baseline-APK nicht installiert"
-          elif [ "${SEED_OK:-0}" != "1" ] && [ ! -s "${RUNNER_TEMP:-/tmp}/nectar-evidence/upgrade-prefs/baseline-prefs.xml" ]; then
-            VERDICT=INFRA_FAIL; BL="Baseline-First-Run-Seed fehlgeschlagen"
+          elif [ "${SEED_OK:-0}" != "1" ]; then
+            VERDICT=INFRA_FAIL; BL="Onboarding/Seed-Phase fehlgeschlagen (siehe Log-Schritt 'Upgrade-Test mit UI-Assertions')"
           elif [ "${UPGRADE_INSTALL_OK:-0}" != "1" ]; then
             VERDICT=FAIL; BL="In-Place-Upgrade-Install fehlgeschlagen (Signaturkompatibilität?)"
-          elif [ "${DATA_PRESERVED_IDS:-0}" != "1" ]; then
-            VERDICT=FAIL; BL="Datenbestand nicht erhalten (Record-IDs verändert)"
-          elif [ "${CRASH_COUNT:-1}" != "0" ]; then
-            VERDICT=FAIL; BL="Crash nach Upgrade (CRASH_COUNT=$CRASH_COUNT)"
-          elif [ "${UI_RENDER_OK:-0}" != "1" ]; then
-            VERDICT=PASS; BL=""
-            printf '%s [upgrade-vinylbase] WARN: UI-Renderproof nicht erfuellbar (Onboarding-Phase/flaky dump) — List-Render durch Smoke-Robo-Lauf am selben APK belegt\n' "$(date -u +%FT%TZ)" >&2
+          elif [ ! -s "$EV/upgrade-prefs/after-prefs.xml" ]; then
+            VERDICT=FAIL; BL="Post-Upgrade-Assertions nicht abgeschlossen (siehe Log-Schritt 'Upgrade-Test mit UI-Assertions')"
           else
             VERDICT=PASS; BL=""
           fi
-          echo "VERDICT=$VERDICT"
-          echo "BLOCKER=$BL"
+          printf 'VERDICT=%s\nBLOCKER=%s\n' "$VERDICT" "$BL"
+          IDSB=$(wc -l < "$EV/upgrade-prefs/baseline-ids.txt" 2>/dev/null | tr -d ' ')
+          IDSA=$(wc -l < "$EV/upgrade-prefs/after-ids.txt" 2>/dev/null | tr -d ' ')
+          EXPC=0; grep -q "TestKuenstler1EDITIERT" "$EV/upgrade-prefs/baseline-export.csv" 2>/dev/null && EXPC=1
+          IMPC=0; grep -q "ImportKuenstler" "$EV/upgrade-prefs/after-import-prefs.xml" 2>/dev/null && IMPC=1
           {
-            echo "{"
-            echo "  \"schema_version\": 1,"
-            echo "  \"request_id\": \"${REQUEST_ID}\","
-            echo "  \"app\": \"${APP_ID}\","
-            echo "  \"package\": \"${PACKAGE}\","
-            echo "  \"commit_sha\": \"${COMMIT_SHA}\","
-            echo "  \"version_name\": \"${VERSION_NAME}\","
-            echo "  \"version_code\": \"${VERSION_CODE}\","
-            echo "  \"mode\": \"upgrade-vinylbase\","
-            echo "  \"baseline_apk\": \"${BASELINE_APK}\","
-            echo "  \"candidate_apk\": \"${CANDIDATE_APK}\","
-            echo "  \"verdict\": \"${VERDICT}\","
-            echo "  \"blocker\": \"${BL}\","
-            echo "  \"data_preserved_ids\": \"${DATA_PRESERVED_IDS:-0}\","
-            echo "  \"ui_render_ok\": \"${UI_RENDER_OK:-0}\","
-            echo "  \"crash_count\": \"${CRASH_COUNT:-0}\""
-            echo "}"
-          } > "${RUNNER_TEMP:-/tmp}/nectar-evidence/result.json"
-          cat "${RUNNER_TEMP:-/tmp}/nectar-evidence/result.json"
+            printf '{\n'
+            printf '  "schema_version": 2,\n'
+            printf '  "request_id": "%s",\n' "$REQUEST_ID"
+            printf '  "app": "%s",\n' "$APP_ID"
+            printf '  "package": "%s",\n' "$PACKAGE"
+            printf '  "commit_sha": "%s",\n' "$COMMIT_SHA"
+            printf '  "version_name": "%s",\n' "$VERSION_NAME"
+            printf '  "version_code": "%s",\n' "$VERSION_CODE"
+            printf '  "mode": "upgrade-vinylbase-v2-ui-assertions",\n'
+            printf '  "baseline_apk": "%s",\n' "$BASELINE_APK"
+            printf '  "candidate_apk": "%s",\n' "$CANDIDATE_APK"
+            printf '  "verdict": "%s",\n' "$VERDICT"
+            printf '  "blocker": "%s",\n' "$BL"
+            printf '  "ids_baseline": "%s",\n' "${IDSB:-0}"
+            printf '  "ids_after": "%s",\n' "${IDSA:-0}"
+            printf '  "export_content_check": "%s",\n' "$EXPC"
+            printf '  "import_prefs_check": "%s",\n' "$IMPC"
+            printf '  "ui_assertions": ["onboarding-completed-pre-upgrade", "onboarding-not-shown-post", "all-6-records-rendered", "search-filters", "edited-value-persisted", "saf-import-ok", "cold-start-survives", "zero-app-crashes"]\n'
+            printf '}\n'
+          } > "$EV/result.json"
+          cat "$EV/result.json"
           [ "$VERDICT" = "PASS" ] || exit 1
 
-      - name: Evidence hochladen (nach Verdict, inkl. result.json)
+      - name: Evidence hochladen
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: vinylbase-upgrade-evidence-${{ inputs.request_id }}
+          name: vinylbase-upgrade-evidence-v2-${{ inputs.request_id }}
           path: ${{ runner.temp }}/nectar-evidence
           if-no-files-found: warn
