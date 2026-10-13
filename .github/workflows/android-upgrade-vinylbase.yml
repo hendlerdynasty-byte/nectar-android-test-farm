@@ -182,6 +182,11 @@ jobs:
           [ -n "$ADB" ] || ADB="${SDK}/platform-tools/adb"
           [ -x "$ADB" ] || { log "adb nicht gefunden"; exit 40; }
 
+          # Release-APKs sind nicht debuggable -> run-as schlaegt fehl.
+          # google_apis-Emulator-Images erlauben adb root -> direkter Dateizugriff.
+          "$ADB" root >/dev/null 2>&1 || true
+          sleep 3
+          "$ADB" wait-for-device >/dev/null 2>&1 || true
           for i in $(seq 1 60); do
             BOOT=$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
             [ "$BOOT" = "1" ] && break
@@ -219,7 +224,7 @@ jobs:
           # 3) Prefs-Snapshot (nur lesen) + Seed-Sanity
           "$ADB" shell am force-stop "$PACKAGE" || true
           sleep 2
-          if ! $ADB exec-out run-as "$PACKAGE" cat "$PREFS_FILE" \
+          if ! $ADB exec-out cat "/data/data/$PACKAGE/$PREFS_FILE" \
               > "$EV/upgrade-prefs/baseline-prefs.xml" 2>"$EV/upgrade-prefs/baseline-prefs.err" \
               || ! grep -q "records_json" "$EV/upgrade-prefs/baseline-prefs.xml"; then
             log "Baseline-Prefs nicht angelegt (First-Run-Persist fehlgeschlagen)"
@@ -261,7 +266,7 @@ jobs:
           #    UUIDs schreiben); UI-Renderproof via uiautomator dump.
           "$ADB" shell am force-stop "$PACKAGE" || true
           sleep 2
-          if ! $ADB exec-out run-as "$PACKAGE" cat "$PREFS_FILE" \
+          if ! $ADB exec-out cat "/data/data/$PACKAGE/$PREFS_FILE" \
               > "$EV/upgrade-prefs/after-prefs.xml" 2>"$EV/upgrade-prefs/after-prefs.err" \
               || ! grep -q "records_json" "$EV/upgrade-prefs/after-prefs.xml"; then
             log "After-Prefs nicht lesbar"
