@@ -195,16 +195,32 @@ jobs:
           done
           [ "$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] \
             || { log "Emulator nicht gebootet"; exit 41; }
-          log "Emulator bereit"
+          # Screen aufwecken + Keyguard wegziehen (Emulator ohne PIN);
+          # ohne dieses findet uiautomator nur den Lockscreen.
+          "$ADB" shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+          sleep 2
+          "$ADB" shell input keyevent 82 >/dev/null 2>&1 || true  # MENU = keyguard dismiss
+          sleep 1
+          "$ADB" shell wm dismiss-keyguard >/dev/null 2>&1 || true
+          sleep 1
+          "$ADB" shell settings put global stay_on_while_plugged_in 3 >/dev/null 2>&1 || true
+          log "Emulator bereit (Screen wach, Keyguard dismissed)"
 
           # ---------- UI-Automation-Helfer (resource-id-basiert, mit Retry) ----------
           PKG_RES="com.hendlerdynasty.vinylbase"
           UIDUMP_N=0
           dump_ui() {
-            UIDUMP_N=$((UIDUMP_N+1))
-            with_timeout 30 "$ADB" shell uiautomator dump /sdcard/uidump.xml >/dev/null 2>&1 || true
-            "$ADB" shell cat /sdcard/uidump.xml > "$EV/ui-dumps/uidump-$UIDUMP_N.xml" 2>/dev/null || true
-            [ -s "$EV/ui-dumps/uidump-$UIDUMP_N.xml" ]
+            local d
+            for d in 1 2 3; do
+              UIDUMP_N=$((UIDUMP_N+1))
+              "$ADB" shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+              with_timeout 30 "$ADB" shell uiautomator dump /sdcard/uidump.xml >/dev/null 2>&1 || true
+              "$ADB" shell cat /sdcard/uidump.xml > "$EV/ui-dumps/uidump-$UIDUMP_N.xml" 2>/dev/null || true
+              [ -s "$EV/ui-dumps/uidump-$UIDUMP_N.xml" ] && return 0
+              sleep 5
+            done
+            with_timeout 20 "$ADB" exec-out screencap -p > "$EV/screenshots/dump-failed-$UIDUMP_N.png" 2>/dev/null || true
+            return 1
           }
           find_bounds() {
             local key="$1" raw coords x1 y1 x2 y2
@@ -286,12 +302,20 @@ jobs:
             log "Onboarding per UI abgeschlossen (btn_skip -> onboarding_done durch App)"
             sleep 4
           else
-            dump_ui || { log "UI-Dump nach Start fehlgeschlagen"; exit 33; }
-            if ui_contains "recycler"; then
-              log "Kein Onboarding (bereits eingerichtet) — fortfahren"
-            else
-              log "Weder Onboarding noch Liste sichtbar"; exit 33
-            fi
+            DUMP_OK=0
+            for dtry in 1 2 3 4; do
+              if dump_ui; then
+                if ui_contains "recycler"; then
+                  log "Kein Onboarding (bereits eingerichtet) — fortfahren"
+                  DUMP_OK=1; break
+                fi
+                # Eventuell war der Screen gerade im Wechsel: nochmal versuchen
+                sleep 5
+              else
+                sleep 5
+              fi
+            done
+            [ "$DUMP_OK" = "1" ] || { log "UI-Status nach Start nicht ermittelbar (Onboarding-UI nicht gefunden, Liste nicht sichtbar)"; exit 33; }
           fi
           echo "SEED_OK=1" >> "$GITHUB_ENV"
 
