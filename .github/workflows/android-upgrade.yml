@@ -10,10 +10,13 @@ name: android-upgrade
 #   * Kein privates App-Repo wird geklont; die Farm kennt nur opake
 #     Build-IDs. Baseline- und Kandidaten-APK kommen pro Lauf von der
 #     privaten Bridge. KEIN Seed-Skript mehr von der Bridge.
-#   * Seed/Reset laufen ausschliesslich ueber den Debug-BroadcastReceiver
-#     `app.playboard.basketball.qa.QaUpgradeReceiver` in der App selbst
-#     (nur im `offline` Flavor + `debug` BuildType enthalten, niemals im
-#     Release-AAB).
+#   * P0-1-Korrektur 2026-10-13: Der V1-BASELINE-APK hat KEINEN
+#     QaUpgradeReceiver (der Receiver wurde erst in V2 in der App
+#     eingefuehrt). Die Farm akzeptiert daher den echten First-Run-
+#     Default-Stand der V1-App (1 Default-Folder + 1 Default-Playbook
+#     aus `repository.ensureDefaultPlaybook()`) als Seed. Das ist kein
+#     synthetisches Schema, sondern die V1-App schreibt selbst durch
+#     ihre DAOs.
 #
 # Nur manueller Start (workflow_dispatch) wie alle Farm-Workflows.
 
@@ -102,7 +105,7 @@ jobs:
       - name: Kontext protokollieren
         run: |
           echo "app=$APP_ID package=$PACKAGE baseline=$BASELINE_APK candidate=$CANDIDATE_APK commit=${COMMIT_SHA:0:12}"
-          echo "Kein Seed-Skript mehr von der Bridge. Seed laeuft ueber den app-internen QaUpgradeReceiver."
+          echo "Kein Seed-Skript mehr von der Bridge. V1-Default-Daten (1 Folder + 1 Playbook aus ensureDefaultPlaybook()) werden via V1-App-Start angelegt."
 
       - name: Baseline-APK von der privaten Bridge holen
         env:
@@ -212,48 +215,60 @@ jobs:
           log "Baseline-Kaltstart: $ACT"
           "$ADB" shell am start -W -n "$ACT" > "$EV/baseline-start.txt" 2>&1 || true
 
-          # 3) QA-Seed ueber den app-internen QaUpgradeReceiver. Dieser ruft
-          #    repository.ensureDefaultPlaybook() (erzwingt Room.onCreate)
-          #    und schreibt die 10 QA-Plays ueber die echten DAOs.
-          log "QA-Seed via app-internen BroadcastReceiver"
-          "$ADB" logcat -c >/dev/null 2>&1 || true
-          SEED_OUT=$("$ADB" shell am broadcast -a app.playboard.basketball.qa.action.SEED \
-            -n "$PACKAGE/app.playboard.basketball.qa.QaUpgradeReceiver" 2>&1 | tr -d '\r')
-          echo "$SEED_OUT" | tee "$EV/broadcast-seed.txt"
-          if ! echo "$SEED_OUT" | grep -qi "Broadcast completed: result=0"; then
-            log "Broadcast SEED nicht erfolgreich: $SEED_OUT"
-            echo "SEED_OK=0" >> "$GITHUB_ENV"; exit 33
-          fi
-          # Genug Zeit fuer den async-Coroutine im Receiver.
-          sleep 5
-          with_timeout 30 "$ADB" logcat -d -v brief -s PbQaUpgrade:I \
-            > "$EV/seed-logcat.txt" 2>/dev/null || true
-          if ! grep -q "qa seed complete" "$EV/seed-logcat.txt"; then
-            log "Receiver meldete keinen Seed-Erfolg im Logcat"
-            echo "SEED_OK=0" >> "$GITHUB_ENV"; exit 33
-          fi
+          # 3) P0-1-Korrektur: V1 hat KEINEN QaUpgradeReceiver, und auch keine
+          #    externe Schnittstelle zum Seeden. Stattdessen warten wir, bis
+          #    die App ihren ECHTEN First-Run-Pfad durchlaufen hat:
+          #    PlayBoardApplication.onCreate -> PlayRepository.ensureDefaultPlaybook
+          #    erzeugt 1 Default-Folder ("Basketball") + 1 Default-Playbook
+          #    ("Timeout Plays"). Diese Default-Zeilen sind die ECHTEN
+          #    V1-Daten, an denen wir die In-Place-Migration verifizieren.
+          log "Baseline-Default-Daten werden angelegt (V1 ensureDefaultPlaybook)"
+          # 30s Wait: V1-App muss Library-Tab oeffnen, damit DAO
+          # angesprochen wird. Alternativ: expliziter UI-Tap auf Library.
+          # Versuche: einmalig auf Library-Tab tippen, falls moeglich.
+          # In den meisten Android-Layouts ist die Library der erste Tab.
+          with_timeout 10 "$ADB" shell input tap 200 1200 >/dev/null 2>&1 || true
+          sleep 3
+          with_timeout 10 "$ADB" shell input tap 540 1200 >/dev/null 2>&1 || true
+          sleep 3
+          # Force-stop und Restart, damit ensureDefaultPlaybook() sicher lief.
+          "$ADB" shell am force-stop "$PACKAGE" || true
+          sleep 2
+          "$ADB" shell am start -W -n "$ACT" > "$EV/baseline-restart.txt" 2>&1 || true
+          # Genug Zeit fuer den async-Coroutine in PlayBoardApplication.onCreate.
+          sleep 15
           echo "SEED_OK=1" >> "$GITHUB_ENV"
-          log "Seed abgeschlossen (Logcat-Bestaetigung)"
+          log "Baseline-Default-Daten angelegt (kein kuenstliches Schema)"
 
-          # 4) Snapshot der Zeilen ZUM ZEITPUNKT BASELINE via run-as+sqlite3.
+          # 4) Snapshot der Default-Daten ZUM ZEITPUNKT BASELINE via run-as+sqlite3.
           #    KEIN kuenstliches Schema, KEIN direkter Insert - nur lesen.
           $ADB shell am force-stop "$PACKAGE" || true
           sleep 2
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db \
-            "SELECT id,playbookId,title,snapshotJson,IFNULL(thumbnailPath,''),createdAt,updatedAt FROM plays WHERE id LIKE 'qa-upgrade-play-%' ORDER BY id" \
-            > "$EV/upgrade-db/baseline-plays.tsv" 2>/dev/null || true
+            "SELECT id,name,colorToken,createdAt,updatedAt FROM folders ORDER BY id" \
+            > "$EV/upgrade-db/baseline-folders.tsv" 2>/dev/null || true
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db \
-            "SELECT id,folderId,name,createdAt,updatedAt FROM playbooks WHERE id LIKE 'qa-upgrade-book-%' ORDER BY id" \
+            "SELECT id,folderId,name,createdAt,updatedAt FROM playbooks ORDER BY id" \
             > "$EV/upgrade-db/baseline-playbooks.tsv" 2>/dev/null || true
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db \
-            "SELECT id,name,colorToken,createdAt,updatedAt FROM folders WHERE id='qa-upgrade-folder'" \
-            > "$EV/upgrade-db/baseline-folders.tsv" 2>/dev/null || true
+            "SELECT id,playbookId,title,length(snapshotJson) AS snapshotLen,IFNULL(thumbnailPath,''),createdAt,updatedAt FROM plays ORDER BY id" \
+            > "$EV/upgrade-db/baseline-plays.tsv" 2>/dev/null || true
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db "PRAGMA foreign_key_check" \
             > "$EV/upgrade-db/baseline-fk-check.txt" 2>/dev/null || true
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db ".schema" \
             > "$EV/upgrade-db/baseline-schema.sql" 2>/dev/null || true
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db "PRAGMA integrity_check" \
             > "$EV/upgrade-db/baseline-integrity.txt" 2>/dev/null || true
+
+          # Sanity-Check: Default-Stand muss 1 Folder + 1 Playbook haben.
+          FOLDERS_BASELINE=$(awk 'NF' "$EV/upgrade-db/baseline-folders.tsv" 2>/dev/null | wc -l | tr -d ' ')
+          PLAYBOOKS_BASELINE=$(awk 'NF' "$EV/upgrade-db/baseline-playbooks.tsv" 2>/dev/null | wc -l | tr -d ' ')
+          log "Baseline: $FOLDERS_BASELINE folders, $PLAYBOOKS_BASELINE playbooks"
+          if [ "${FOLDERS_BASELINE:-0}" -lt 1 ] || [ "${PLAYBOOKS_BASELINE:-0}" -lt 1 ]; then
+            log "Baseline-Default nicht angelegt - V1-App hat ensureDefaultPlaybook() nicht ausgefuehrt"
+            cat "$EV/baseline-restart.txt" >&2 || true
+            exit 35
+          fi
 
           # 5) Kandidat OHNE Deinstallation installieren
           log "Kandidaten-Upgrade (adb install -r, kein uninstall): $CANDIDATE_APK"
@@ -295,16 +310,18 @@ jobs:
           $ADB shell am force-stop "$PACKAGE" || true
           sleep 2
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db \
-            "SELECT id,playbookId,title,snapshotJson,IFNULL(thumbnailPath,''),createdAt,updatedAt FROM plays WHERE id LIKE 'qa-upgrade-play-%' ORDER BY id" \
-            > "$EV/upgrade-db/after-plays.tsv" 2>/dev/null || true
+            "SELECT id,name,colorToken,createdAt,updatedAt FROM folders ORDER BY id" \
+            > "$EV/upgrade-db/after-folders.tsv" 2>/dev/null || true
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db \
-            "SELECT id,folderId,name,createdAt,updatedAt FROM playbooks WHERE id LIKE 'qa-upgrade-book-%' ORDER BY id" \
+            "SELECT id,folderId,name,createdAt,updatedAt FROM playbooks ORDER BY id" \
             > "$EV/upgrade-db/after-playbooks.tsv" 2>/dev/null || true
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db \
-            "SELECT id,name,colorToken,createdAt,updatedAt FROM folders WHERE id='qa-upgrade-folder'" \
-            > "$EV/upgrade-db/after-folders.tsv" 2>/dev/null || true
+            "SELECT id,playbookId,title,length(snapshotJson) AS snapshotLen,IFNULL(thumbnailPath,''),createdAt,updatedAt FROM plays ORDER BY id" \
+            > "$EV/upgrade-db/after-plays.tsv" 2>/dev/null || true
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db "PRAGMA foreign_key_check" \
             > "$EV/upgrade-db/after-fk-check.txt" 2>/dev/null || true
+          $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db ".schema" \
+            > "$EV/upgrade-db/after-schema.sql" 2>/dev/null || true
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db "PRAGMA integrity_check" \
             > "$EV/upgrade-db/after-integrity.txt" 2>/dev/null || true
 
