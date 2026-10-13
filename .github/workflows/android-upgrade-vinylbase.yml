@@ -360,7 +360,7 @@ jobs:
             VERDICT=FAIL; BL="Crash nach Upgrade (CRASH_COUNT=$CRASH_COUNT)"
           elif [ "${UI_RENDER_OK:-0}" != "1" ]; then
             VERDICT=PASS; BL=""
-            log "WARN: UI-Renderproof nicht erfuellbar (Onboarding-Phase/flaky dump) — List-Render durch Smoke-Robo-Lauf am selben APK belegt"
+            printf '%s [upgrade-vinylbase] WARN: UI-Renderproof nicht erfuellbar (Onboarding-Phase/flaky dump) — List-Render durch Smoke-Robo-Lauf am selben APK belegt\n' "$(date -u +%FT%TZ)" >&2
           else
             VERDICT=PASS; BL=""
           fi
