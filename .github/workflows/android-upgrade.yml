@@ -242,23 +242,46 @@ jobs:
 
           # 4) Snapshot der Default-Daten ZUM ZEITPUNKT BASELINE via run-as+sqlite3.
           #    KEIN kuenstliches Schema, KEIN direkter Insert - nur lesen.
+          #    P0-2: sqlite3-Verfuegbarkeit + harte Exit-Codes (kein
+          #    unterdrueckter Fehler als PASS).
           $ADB shell am force-stop "$PACKAGE" || true
           sleep 2
+
+          # 4a) sqlite3-Precheck
+          SQLITE_AVAIL=$("$ADB" shell which sqlite3 2>/dev/null | tr -d '\r' | head -1)
+          if [ -z "$SQLITE_AVAIL" ]; then
+            log "WARN: sqlite3 nicht im Emulator-PATH; versuche /system/bin/sqlite3"
+            SQLITE_AVAIL=$("$ADB" shell ls /system/bin/sqlite3 2>/dev/null | tr -d '\r' | head -1)
+          fi
+          echo "SQLITE_AVAIL=$SQLITE_AVAIL" | tee "$EV/sqlite-availability.txt"
+          if [ -z "$SQLITE_AVAIL" ]; then
+            log "INFRA_FAIL: sqlite3 im Emulator nicht verfuegbar"
+            echo "SEED_OK=0" >> "$GITHUB_ENV"
+            exit 36
+          fi
+
+          # 4b) Baseline-Reads (HARTE Exit-Codes; jeder Fehler = FAIL)
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db \
             "SELECT id,name,colorToken,createdAt,updatedAt FROM folders ORDER BY id" \
-            > "$EV/upgrade-db/baseline-folders.tsv" 2>/dev/null || true
+            > "$EV/upgrade-db/baseline-folders.tsv" 2>"$EV/upgrade-db/baseline-folders.err" \
+            || { log "Baseline folders-Read fehlgeschlagen"; cat "$EV/upgrade-db/baseline-folders.err" >&2; exit 38; }
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db \
             "SELECT id,folderId,name,createdAt,updatedAt FROM playbooks ORDER BY id" \
-            > "$EV/upgrade-db/baseline-playbooks.tsv" 2>/dev/null || true
+            > "$EV/upgrade-db/baseline-playbooks.tsv" 2>"$EV/upgrade-db/baseline-playbooks.err" \
+            || { log "Baseline playbooks-Read fehlgeschlagen"; cat "$EV/upgrade-db/baseline-playbooks.err" >&2; exit 38; }
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db \
             "SELECT id,playbookId,title,length(snapshotJson) AS snapshotLen,IFNULL(thumbnailPath,''),createdAt,updatedAt FROM plays ORDER BY id" \
-            > "$EV/upgrade-db/baseline-plays.tsv" 2>/dev/null || true
+            > "$EV/upgrade-db/baseline-plays.tsv" 2>"$EV/upgrade-db/baseline-plays.err" \
+            || { log "Baseline plays-Read fehlgeschlagen"; cat "$EV/upgrade-db/baseline-plays.err" >&2; exit 38; }
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db "PRAGMA foreign_key_check" \
-            > "$EV/upgrade-db/baseline-fk-check.txt" 2>/dev/null || true
+            > "$EV/upgrade-db/baseline-fk-check.txt" 2>"$EV/upgrade-db/baseline-fk-check.err" \
+            || { log "Baseline FK-Check fehlgeschlagen"; cat "$EV/upgrade-db/baseline-fk-check.err" >&2; exit 38; }
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db ".schema" \
-            > "$EV/upgrade-db/baseline-schema.sql" 2>/dev/null || true
+            > "$EV/upgrade-db/baseline-schema.sql" 2>"$EV/upgrade-db/baseline-schema.err" \
+            || { log "Baseline Schema-Dump fehlgeschlagen"; cat "$EV/upgrade-db/baseline-schema.err" >&2; exit 38; }
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db "PRAGMA integrity_check" \
-            > "$EV/upgrade-db/baseline-integrity.txt" 2>/dev/null || true
+            > "$EV/upgrade-db/baseline-integrity.txt" 2>"$EV/upgrade-db/baseline-integrity.err" \
+            || { log "Baseline Integrity-Check fehlgeschlagen"; cat "$EV/upgrade-db/baseline-integrity.err" >&2; exit 38; }
 
           # Sanity-Check: Default-Stand muss 1 Folder + 1 Playbook haben.
           FOLDERS_BASELINE=$(awk 'NF' "$EV/upgrade-db/baseline-folders.tsv" 2>/dev/null | wc -l | tr -d ' ')
@@ -307,23 +330,30 @@ jobs:
           with_timeout 45 "$ADB" exec-out screencap -p > "$EV/screenshots/upgrade-restart.png" 2>/dev/null || true
 
           # 7) Nach-Upgrade-Snapshot: identisches SQL-SELECT, danach Diff.
+          #    P0-2: harte Exit-Codes, kein "|| true" zum Fehlerschlucken.
           $ADB shell am force-stop "$PACKAGE" || true
           sleep 2
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db \
             "SELECT id,name,colorToken,createdAt,updatedAt FROM folders ORDER BY id" \
-            > "$EV/upgrade-db/after-folders.tsv" 2>/dev/null || true
+            > "$EV/upgrade-db/after-folders.tsv" 2>"$EV/upgrade-db/after-folders.err" \
+            || { log "After folders-Read fehlgeschlagen"; cat "$EV/upgrade-db/after-folders.err" >&2; exit 39; }
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db \
             "SELECT id,folderId,name,createdAt,updatedAt FROM playbooks ORDER BY id" \
-            > "$EV/upgrade-db/after-playbooks.tsv" 2>/dev/null || true
+            > "$EV/upgrade-db/after-playbooks.tsv" 2>"$EV/upgrade-db/after-playbooks.err" \
+            || { log "After playbooks-Read fehlgeschlagen"; cat "$EV/upgrade-db/after-playbooks.err" >&2; exit 39; }
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db \
             "SELECT id,playbookId,title,length(snapshotJson) AS snapshotLen,IFNULL(thumbnailPath,''),createdAt,updatedAt FROM plays ORDER BY id" \
-            > "$EV/upgrade-db/after-plays.tsv" 2>/dev/null || true
+            > "$EV/upgrade-db/after-plays.tsv" 2>"$EV/upgrade-db/after-plays.err" \
+            || { log "After plays-Read fehlgeschlagen"; cat "$EV/upgrade-db/after-plays.err" >&2; exit 39; }
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db "PRAGMA foreign_key_check" \
-            > "$EV/upgrade-db/after-fk-check.txt" 2>/dev/null || true
+            > "$EV/upgrade-db/after-fk-check.txt" 2>"$EV/upgrade-db/after-fk-check.err" \
+            || { log "After FK-Check fehlgeschlagen"; cat "$EV/upgrade-db/after-fk-check.err" >&2; exit 39; }
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db ".schema" \
-            > "$EV/upgrade-db/after-schema.sql" 2>/dev/null || true
+            > "$EV/upgrade-db/after-schema.sql" 2>"$EV/upgrade-db/after-schema.err" \
+            || { log "After Schema-Dump fehlgeschlagen"; cat "$EV/upgrade-db/after-schema.err" >&2; exit 39; }
           $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db "PRAGMA integrity_check" \
-            > "$EV/upgrade-db/after-integrity.txt" 2>/dev/null || true
+            > "$EV/upgrade-db/after-integrity.txt" 2>"$EV/upgrade-db/after-integrity.err" \
+            || { log "After Integrity-Check fehlgeschlagen"; cat "$EV/upgrade-db/after-integrity.err" >&2; exit 39; }
 
           DIFF_FAIL=0
           for tbl in plays playbooks folders; do
@@ -392,7 +422,20 @@ jobs:
             VERDICT=FAIL
             BL="Absturz nach dem Upgrade"
           else
-            VERDICT=PASS
+            # P0-2: ehrliche Teilpruefung, wenn nur Default-Stand vorhanden.
+            # Wenn das Plays-Snapshot <= 1 Zeile hat UND keine JSON-Snapshots
+            # >= 1000 Bytes vorhanden sind, dann war kein "echter" User-Daten-
+            # Upgrade-Gegenstand da, nur die App-eigene Default-Bestueckung.
+            # Das ist keine vollstaendige G8/G15-Bestaetigung.
+            PLAY_LINES=$(awk 'NF' "$EV/upgrade-db/after-plays.tsv" 2>/dev/null | wc -l | tr -d ' ')
+            SUBSTANTIAL_JSON=$(awk -F'\t' 'length($5) >= 1000 {n++} END {print n+0}' \
+              "$EV/upgrade-db/after-plays.tsv" 2>/dev/null)
+            if [ "${PLAY_LINES:-0}" -le 1 ] || [ "${SUBSTANTIAL_JSON:-0}" -lt 1 ]; then
+              VERDICT=PARTIAL
+              BL="Nur Default-Stand (1 Folder + 1 Playbook + 0 echte Plays) verifiziert. Kein vollstaendiger G8/G15-Test."
+            else
+              VERDICT=PASS
+            fi
           fi
           export VERDICT
           [ -n "$BL" ] && export BLOCKER="$BL"
