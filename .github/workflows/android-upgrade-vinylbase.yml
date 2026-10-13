@@ -222,7 +222,11 @@ jobs:
           log "Emulator bereit (Screen wach, Keyguard dismissed, Settle ok)"
 
           # ---------- UI-Automation-Helfer (resource-id-basiert, mit Retry) ----------
-          PKG_RES="com.hendlerdynasty.vinylbase"
+          # uiautomator resource-ids sind mit der applicationId des
+          # INSTALLIERTEN APK namespaced (app.vinylbase.local), nicht mit dem
+          # Kotlin-R-Class-Namespace — belegt in Run 38477427959, Dump 13:
+          # resource-id="app.vinylbase.local:id/btn_skip".
+          PKG_RES="$PACKAGE"
           UIDUMP_N=0
           dump_ui() {
             local d
