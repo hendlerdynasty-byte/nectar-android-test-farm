@@ -285,10 +285,17 @@ jobs:
             cat "$EV/upgrade-prefs/diff-ids.txt" >&2 || true
           fi
 
-          # UI-Renderproof: Liste muss migrierte Records zeigen
+          # UI-Renderproof: Liste muss migrierte Records zeigen.
+          # uiautomator dump hat auf Emulatoren bekannte UiAutomation-Connect-
+          # Timeouts (LL-011-Klasse: Test-Flake, kein Produktdefekt) -> Retry.
           UI_OK=0
-          with_timeout 30 "$ADB" shell uiautomator dump /sdcard/uidump.xml >/dev/null 2>&1 || true
-          $ADB shell cat /sdcard/uidump.xml > "$EV/screenshots/upgrade-uidump.xml" 2>/dev/null || true
+          for DUMP_TRY in 1 2 3; do
+            rm -f /sdcard/uidump.xml 2>/dev/null || true
+            with_timeout 30 "$ADB" shell uiautomator dump /sdcard/uidump.xml >/dev/null 2>&1 || true
+            $ADB shell cat /sdcard/uidump.xml > "$EV/screenshots/upgrade-uidump.xml" 2>/dev/null || true
+            [ -s "$EV/screenshots/upgrade-uidump.xml" ] && break
+            sleep 6
+          done
           if [ -s "$EV/screenshots/upgrade-uidump.xml" ]; then
             UI_HITS=0
             for n in "Kind of Blue" "Autobahn" "Discovery"; do
@@ -312,7 +319,10 @@ jobs:
 
           # 8) Logcat + Crash-Scan
           with_timeout 90 "$ADB" logcat -d -v threadtime -t 2000 > "$EV/logcat/full-logcat.txt" 2>/dev/null || true
-          CRASH_COUNT=$( { grep -cE "FATAL EXCEPTION|am_crash.*${PACKAGE}" "$EV/logcat/full-logcat.txt" 2>/dev/null || true; } | head -1 )
+          # App-Crash-Scan: nur am_crash des Pakets UND FATAL EXCEPTION, die
+          # NICHT vom uiautomator-Shell-Kommando stammt (DumpCommand-Crash bei
+          # UiAutomation-Timeout ist Testinfrastruktur, nicht die App).
+          CRASH_COUNT=$( { grep -E "am_crash.*${PACKAGE}" "$EV/logcat/full-logcat.txt" 2>/dev/null;                            grep "FATAL EXCEPTION" "$EV/logcat/full-logcat.txt" 2>/dev/null                              | grep -cv "uiautomator"; } 2>/dev/null | wc -l | tr -d ' ' )
           CRASH_COUNT="${CRASH_COUNT:-0}"
           case "$CRASH_COUNT" in ''|*[!0-9]*) CRASH_COUNT=0 ;; esac
           echo "CRASH_COUNT=$CRASH_COUNT" >> "$GITHUB_ENV"
@@ -322,19 +332,6 @@ jobs:
           echo "TESTS_FAILED=0" >> "$GITHUB_ENV"
           log "VinylBase-Upgrade-Test abgeschlossen"
           exit 0
-
-      - name: Ergebnis normalisieren
-        if: always()
-        run: |
-          bash ./scripts/normalize-result.sh || true
-
-      - name: Evidence hochladen
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: vinylbase-upgrade-evidence-${{ inputs.request_id }}
-          path: ${{ runner.temp }}/nectar-evidence
-          if-no-files-found: warn
 
       - name: Verdict
         if: always()
@@ -379,3 +376,11 @@ jobs:
           } > "${RUNNER_TEMP:-/tmp}/nectar-evidence/result.json"
           cat "${RUNNER_TEMP:-/tmp}/nectar-evidence/result.json"
           [ "$VERDICT" = "PASS" ] || exit 1
+
+      - name: Evidence hochladen (nach Verdict, inkl. result.json)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vinylbase-upgrade-evidence-${{ inputs.request_id }}
+          path: ${{ runner.temp }}/nectar-evidence
+          if-no-files-found: warn
