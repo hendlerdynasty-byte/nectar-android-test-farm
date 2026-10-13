@@ -1,16 +1,19 @@
 name: android-upgrade
 
-# In-Place-Upgrade-Regression: Baseline-APK installieren, Nutzerdaten
-# seeden, Kandidaten-APK OHNE Deinstallation darueber installieren,
-# Datenbestand verifizieren.
+# In-Place-Upgrade-Regression: Baseline-APK installieren, App-Room-DB durch
+# die echte App oeffnen lassen (kein synthetisches Schema, kein Bridge-Python-
+# Skript mehr), QA-Seed-Zeilen via app-internen BroadcastReceiver durch die
+# Produktions-DAOs schreiben, Kandidaten-APK OHNE Deinstallation darueber
+# installieren, Datenbestand byte-genau verifizieren.
 #
 # Datenschutz-Eigenschaften (wie android-smoke):
 #   * Kein privates App-Repo wird geklont; die Farm kennt nur opake
-#     Build-IDs. Baseline- und Kandidaten-APK sowie das Seed-Skript
-#     kommen pro Lauf von der privaten Bridge.
-#   * Das Seed-Skript ist im Workflow eingebettet limitiert (reines
-#     adb/sqlite3-Regex-Denylist-Veto) und nach dem Lauf vom Runner
-#     geloescht.
+#     Build-IDs. Baseline- und Kandidaten-APK kommen pro Lauf von der
+#     privaten Bridge. KEIN Seed-Skript mehr von der Bridge.
+#   * Seed/Reset laufen ausschliesslich ueber den Debug-BroadcastReceiver
+#     `app.playboard.basketball.qa.QaUpgradeReceiver` in der App selbst
+#     (nur im `offline` Flavor + `debug` BuildType enthalten, niemals im
+#     Release-AAB).
 #
 # Nur manueller Start (workflow_dispatch) wie alle Farm-Workflows.
 
@@ -45,20 +48,12 @@ on:
         description: 'Dateiname des Kandidaten-APK auf der Bridge'
         required: true
         type: string
-      seed_script:
-        description: 'Dateiname des Seed/Verify-Skripts auf der Bridge'
-        required: true
-        type: string
       baseline_sha256:
         description: 'Erwartete SHA256 des Baseline-APK (fail closed)'
         required: false
         type: string
       candidate_sha256:
         description: 'Erwartete SHA256 des Kandidaten-APK (fail closed)'
-        required: false
-        type: string
-      seed_sha256:
-        description: 'Erwartete SHA256 des Seed-Skripts (fail closed, ueberschreibt GITHUB_ENV-Vererbung)'
         required: false
         type: string
       version_name:
@@ -88,7 +83,6 @@ env:
   COMMIT_SHA: ${{ inputs.commit_sha }}
   BASELINE_APK: ${{ inputs.baseline_apk }}
   CANDIDATE_APK: ${{ inputs.candidate_apk }}
-  SEED_SCRIPT: ${{ inputs.seed_script }}
   VERSION_NAME: ${{ inputs.version_name }}
   VERSION_CODE: ${{ inputs.version_code }}
   MODE: upgrade
@@ -108,7 +102,7 @@ jobs:
       - name: Kontext protokollieren
         run: |
           echo "app=$APP_ID package=$PACKAGE baseline=$BASELINE_APK candidate=$CANDIDATE_APK commit=${COMMIT_SHA:0:12}"
-          echo "Kein Secret, keine URL und kein Artefaktinhalt wird ausgegeben."
+          echo "Kein Seed-Skript mehr von der Bridge. Seed laeuft ueber den app-internen QaUpgradeReceiver."
 
       - name: Baseline-APK von der privaten Bridge holen
         env:
@@ -128,22 +122,19 @@ jobs:
           ARTIFACT_SHA256: ${{ inputs.candidate_sha256 }}
         run: ./scripts/fetch-artifact.sh
 
-      - name: Seed-Skript von der privaten Bridge holen (denylist-geprueft)
+      - name: Artefakt-Integritaet bestaetigen
         env:
-          BRIDGE_URL: ${{ secrets.BRIDGE_URL }}
-          BRIDGE_TOKEN: ${{ secrets.BRIDGE_TOKEN }}
-          BUILD_ID: ${{ inputs.build_id }}
-          ARTIFACT_NAME: ${{ inputs.seed_script }}
-          ARTIFACT_SHA256: ${{ inputs.seed_sha256 }}
+          WORK_ART: ${{ runner.temp }}/nectar-artifact
         run: |
-          ./scripts/fetch-artifact.sh
-          SCRIPT_PATH="${RUNNER_TEMP:-/tmp}/nectar-artifact/${ARTIFACT_NAME}"
-          # Fail-closed: Nur adb/sqlite3/python-stdlib-Skripte erlauben.
-          if grep -En 'curl |wget |nc |ssh |(rm|chmod|chown)[[:space:]]+(-[a-zA-Z]*[[:space:]]*)*/|/etc/|/Users/|base64[[:space:]]+-d|http[s]?://' "$SCRIPT_PATH" >/dev/null 2>&1; then
-            echo "ABGELEHNT: Seed-Skript enthaelt verbotene Muster"
-            exit 11
-          fi
-          chmod 644 "$SCRIPT_PATH"
+          set -euo pipefail
+          EV="${RUNNER_TEMP:-/tmp}/nectar-evidence"
+          mkdir -p "$EV"
+          shasum -a 256 "$WORK_ART/$BASELINE_APK" "$WORK_ART/$CANDIDATE_APK" \
+            | tee "$EV/artefact-sha256.txt"
+          test -s "$WORK_ART/$BASELINE_APK" || { echo "Baseline-APK leer"; exit 31; }
+          test -s "$WORK_ART/$CANDIDATE_APK" || { echo "Kandidaten-APK leer"; exit 31; }
+          echo "ARTIFACT_SHA256=$(shasum -a 256 "$WORK_ART/$BASELINE_APK" | cut -d' ' -f1)" \
+            >> "$GITHUB_ENV"
 
       - name: Ziel-API bestimmen (inline, Kandidat als Referenz)
         env:
@@ -151,8 +142,6 @@ jobs:
           CAND_PATH: ${{ runner.temp }}/nectar-artifact/${{ inputs.candidate_apk }}
         run: |
           set -euo pipefail
-          # minSdk 23 ist am Kandidaten lokal belegt (aapt2 badging, Beleg im
-          # App-Repo); auf dem Runner variieren die build-tools-Formate.
           MIN=23
           API="${REQUESTED_API:-34}"
           case "$API" in ''|*[!0-9]*) echo "target_api keine Zahl" >&2; exit 1 ;; esac
@@ -167,7 +156,6 @@ jobs:
         run: |
           set -uo pipefail
           TARGET_API="${TARGET_API:-34}" bash ./scripts/boot-emulator.sh || {
-            # Diagnostics
             ls -la "$HOME/.android/avd" 2>&1 | head -5 || true
             find "$HOME/.android" "$SDK" -maxdepth 4 -name 'nectar-api*.ini' 2>&1 | head -5 || true
             exit 23
@@ -217,45 +205,57 @@ jobs:
             log "Baseline fehlgeschlagen: $OUT"; exit 31
           fi
 
-          # 2) Baseline starten (Room/DataStore-Dateien erzeugen), stoppen
+          # 2) Baseline starten, damit die App ihre Application.onCreate
+          #    durchlaeuft (PlayBoardApplication -> PlayBoardDatabase.get(this)).
           ACT=$(resolve_launcher)
           case "$ACT" in "$PACKAGE"/*) ;; *) log "Launcher nicht aufloesbar: $ACT"; exit 32 ;; esac
           log "Baseline-Kaltstart: $ACT"
           "$ADB" shell am start -W -n "$ACT" > "$EV/baseline-start.txt" 2>&1 || true
-          sleep 8
-          "$ADB" shell am force-stop "$PACKAGE" || true
-          sleep 3
-          log "Baseline gestoppt - Nutzerdaten werden geseedet"
 
-          # 3) Nutzerdaten seeden. P1-Fix 2026-10-13: kein Python-Bridge-Skript
-          #    mehr noetig. Das Schema wird inline via adb-sqlite3 angelegt
-          #    (bootstrap-room-schema.sh), dann direkt in die DB geschrieben
-          #    (seed-room-data.sh). Damit ist der Fehler "no such table:
-          #    folders" strukturell ausgeschlossen.
-          if ( cd "$EV" && PKG="$PACKAGE" DB="databases/playboard.db" \
-                EV="$EV" ADB="$ADB" \
-                with_timeout 120 bash "$GITHUB_WORKSPACE/scripts/bootstrap-room-schema.sh" ) \
-              > "$EV/bootstrap.log" 2>&1; then
-            log "Schema-Bootstrap OK"
-          else
-            cat "$EV/bootstrap.log" >&2 || true
-            echo "SEED_OK=0" >> "$GITHUB_ENV"
-            log "Schema-Bootstrap fehlgeschlagen"
-            exit 33
+          # 3) QA-Seed ueber den app-internen QaUpgradeReceiver. Dieser ruft
+          #    repository.ensureDefaultPlaybook() (erzwingt Room.onCreate)
+          #    und schreibt die 10 QA-Plays ueber die echten DAOs.
+          log "QA-Seed via app-internen BroadcastReceiver"
+          "$ADB" logcat -c >/dev/null 2>&1 || true
+          SEED_OUT=$("$ADB" shell am broadcast -a app.playboard.basketball.qa.action.SEED \
+            -n "$PACKAGE/app.playboard.basketball.qa.QaUpgradeReceiver" 2>&1 | tr -d '\r')
+          echo "$SEED_OUT" | tee "$EV/broadcast-seed.txt"
+          if ! echo "$SEED_OUT" | grep -qi "Broadcast completed: result=0"; then
+            log "Broadcast SEED nicht erfolgreich: $SEED_OUT"
+            echo "SEED_OK=0" >> "$GITHUB_ENV"; exit 33
           fi
-          if ( cd "$EV" && PKG="$PACKAGE" DB="databases/playboard.db" \
-                EV="$EV" ADB="$ADB" \
-                with_timeout 120 bash "$GITHUB_WORKSPACE/scripts/seed-room-data.sh" ) \
-              > "$EV/seed.log" 2>&1; then
-            echo "SEED_OK=1" >> "$GITHUB_ENV"; log "Seed OK"
-          else
-            cat "$EV/seed.log" >&2 || true
-            echo "SEED_OK=0" >> "$GITHUB_ENV"
-            log "Seed fehlgeschlagen"
-            exit 33
+          # Genug Zeit fuer den async-Coroutine im Receiver.
+          sleep 5
+          with_timeout 30 "$ADB" logcat -d -v brief -s PbQaUpgrade:I \
+            > "$EV/seed-logcat.txt" 2>/dev/null || true
+          if ! grep -q "qa seed complete" "$EV/seed-logcat.txt"; then
+            log "Receiver meldete keinen Seed-Erfolg im Logcat"
+            echo "SEED_OK=0" >> "$GITHUB_ENV"; exit 33
           fi
+          echo "SEED_OK=1" >> "$GITHUB_ENV"
+          log "Seed abgeschlossen (Logcat-Bestaetigung)"
 
-          # 4) Kandidat OHNE Deinstallation installieren
+          # 4) Snapshot der Zeilen ZUM ZEITPUNKT BASELINE via run-as+sqlite3.
+          #    KEIN kuenstliches Schema, KEIN direkter Insert - nur lesen.
+          $ADB shell am force-stop "$PACKAGE" || true
+          sleep 2
+          $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db \
+            "SELECT id,playbookId,title,snapshotJson,IFNULL(thumbnailPath,''),createdAt,updatedAt FROM plays WHERE id LIKE 'qa-upgrade-play-%' ORDER BY id" \
+            > "$EV/upgrade-db/baseline-plays.tsv" 2>/dev/null || true
+          $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db \
+            "SELECT id,folderId,name,createdAt,updatedAt FROM playbooks WHERE id LIKE 'qa-upgrade-book-%' ORDER BY id" \
+            > "$EV/upgrade-db/baseline-playbooks.tsv" 2>/dev/null || true
+          $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db \
+            "SELECT id,name,colorToken,createdAt,updatedAt FROM folders WHERE id='qa-upgrade-folder'" \
+            > "$EV/upgrade-db/baseline-folders.tsv" 2>/dev/null || true
+          $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db "PRAGMA foreign_key_check" \
+            > "$EV/upgrade-db/baseline-fk-check.txt" 2>/dev/null || true
+          $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db ".schema" \
+            > "$EV/upgrade-db/baseline-schema.sql" 2>/dev/null || true
+          $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db "PRAGMA integrity_check" \
+            > "$EV/upgrade-db/baseline-integrity.txt" 2>/dev/null || true
+
+          # 5) Kandidat OHNE Deinstallation installieren
           log "Kandidaten-Upgrade (adb install -r, kein uninstall): $CANDIDATE_APK"
           OUT=$("$ADB" install -r "$WORK_ART/$CANDIDATE_APK" 2>&1)
           if echo "$OUT" | grep -qi "success"; then
@@ -266,7 +266,7 @@ jobs:
             exit 34
           fi
 
-          # 5) Kandidaten-Kaltstart + Screenshot-Beweis
+          # 6) Kandidaten-Kaltstart + Screenshot-Beweis
           "$ADB" logcat -c >/dev/null 2>&1 || true
           ACT=$(resolve_launcher)
           "$ADB" shell am start -W -n "$ACT" > "$EV/candidate-start.txt" 2>&1 || true
@@ -284,32 +284,60 @@ jobs:
           echo "SHOT_OK=$SHOT_OK" >> "$GITHUB_ENV"
           log "Screenshot: SHOT_OK=$SHOT_OK"
 
-          # Resume nach force-stop - Update-Semantik ueber Restart
+          # Restart nach force-stop, um Update-Semantik zu pruefen
           "$ADB" shell am force-stop "$PACKAGE" || true
           sleep 2
           "$ADB" shell am start -n "$ACT" >/dev/null 2>&1 || true
           sleep 6
           with_timeout 45 "$ADB" exec-out screencap -p > "$EV/screenshots/upgrade-restart.png" 2>/dev/null || true
 
-          # 6) Datenbestand verifizieren (exakte Zeilenerhaltung).
-          #    P1-Fix 2026-10-13: kein Python-Bridge-Skript mehr noetig.
-          #    verify-room-preservation.sh vergleicht die TSV-Snapshots aus
-          #    upgrade-db/expected-* gegen actual-* und liefert byte-genauen
-          #    Beweis (diff-Dateien in upgrade-db/diff-*).
-          if ( cd "$EV" && PKG="$PACKAGE" DB="databases/playboard.db" \
-                EV="$EV" ADB="$ADB" \
-                with_timeout 120 bash "$GITHUB_WORKSPACE/scripts/verify-room-preservation.sh" ) \
-              > "$EV/verify.log" 2>&1; then
-            echo "DATA_PRESERVED=1" >> "$GITHUB_ENV"; log "Datenbestand exakt erhalten"
-            cat "$EV/verify.log" >&2 || true
-          else
-            cat "$EV/verify.log" >&2 || true
-            echo "DATA_PRESERVED=0" >> "$GITHUB_ENV"
-            log "Datenbestand nach Upgrade beschädigt/verloren"
-          fi
-          cp -a "$EV/upgrade-db/." "$EV/upgrade-db/" 2>/dev/null || true
+          # 7) Nach-Upgrade-Snapshot: identisches SQL-SELECT, danach Diff.
+          $ADB shell am force-stop "$PACKAGE" || true
+          sleep 2
+          $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db \
+            "SELECT id,playbookId,title,snapshotJson,IFNULL(thumbnailPath,''),createdAt,updatedAt FROM plays WHERE id LIKE 'qa-upgrade-play-%' ORDER BY id" \
+            > "$EV/upgrade-db/after-plays.tsv" 2>/dev/null || true
+          $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db \
+            "SELECT id,folderId,name,createdAt,updatedAt FROM playbooks WHERE id LIKE 'qa-upgrade-book-%' ORDER BY id" \
+            > "$EV/upgrade-db/after-playbooks.tsv" 2>/dev/null || true
+          $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db \
+            "SELECT id,name,colorToken,createdAt,updatedAt FROM folders WHERE id='qa-upgrade-folder'" \
+            > "$EV/upgrade-db/after-folders.tsv" 2>/dev/null || true
+          $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db "PRAGMA foreign_key_check" \
+            > "$EV/upgrade-db/after-fk-check.txt" 2>/dev/null || true
+          $ADB exec-out run-as "$PACKAGE" sqlite3 databases/playboard.db "PRAGMA integrity_check" \
+            > "$EV/upgrade-db/after-integrity.txt" 2>/dev/null || true
 
-          # 7) Logcat + Crash-Scan
+          DIFF_FAIL=0
+          for tbl in plays playbooks folders; do
+            if ! diff -u "$EV/upgrade-db/baseline-$tbl.tsv" "$EV/upgrade-db/after-$tbl.tsv" \
+                > "$EV/upgrade-db/diff-$tbl.txt" 2>/dev/null; then
+              DIFF_FAIL=1
+              log "Diff in Tabelle $tbl: siehe upgrade-db/diff-$tbl.txt"
+            fi
+          done
+
+          # FK-Check muss nach Upgrade LEER sein.
+          if [ -s "$EV/upgrade-db/after-fk-check.txt" ]; then
+            log "FK-Verletzungen nach Upgrade:"
+            cat "$EV/upgrade-db/after-fk-check.txt" >&2
+            DIFF_FAIL=1
+          fi
+          if ! grep -q "^ok$" "$EV/upgrade-db/after-integrity.txt"; then
+            log "SQLite-Integritaet nach Upgrade fehlerhaft:"
+            cat "$EV/upgrade-db/after-integrity.txt" >&2
+            DIFF_FAIL=1
+          fi
+
+          if [ "$DIFF_FAIL" = "0" ]; then
+            echo "DATA_PRESERVED=1" >> "$GITHUB_ENV"
+            log "Datenbestand exakt erhalten (byte-genaue TSV-Diff + FK + integrity OK)"
+          else
+            echo "DATA_PRESERVED=0" >> "$GITHUB_ENV"
+            log "Datenbestand nach Upgrade beschaedigt"
+          fi
+
+          # 8) Logcat + Crash-Scan
           with_timeout 90 "$ADB" logcat -d -v threadtime -t 2000 > "$EV/logcat/full-logcat.txt" 2>/dev/null || true
           CRASH_COUNT=$( { grep -cE "FATAL EXCEPTION|am_crash.*${PACKAGE}" "$EV/logcat/full-logcat.txt" 2>/dev/null || true; } | head -1 )
           CRASH_COUNT="${CRASH_COUNT:-0}"
@@ -336,13 +364,13 @@ jobs:
             BL="Baseline-APK wurde nicht installiert"
           elif [ "${SEED_OK:-0}" != "1" ]; then
             VERDICT=INFRA_FAIL
-            BL="Nutzerdaten konnten nicht geseedet werden"
+            BL="QA-Seed ueber app-internen Receiver fehlgeschlagen (Room.onCreate oder DAO-Write)"
           elif [ "${UPGRADE_INSTALL_OK:-0}" != "1" ]; then
             VERDICT=FAIL
             BL="Kandidaten-APK konnte nicht ohne Deinstallation installiert werden"
           elif [ "${DATA_PRESERVED:-0}" != "1" ]; then
             VERDICT=FAIL
-            BL="Nutzerdaten nach dem Upgrade beschädigt oder verloren"
+            BL="Nutzerdaten nach dem Upgrade beschaedigt oder verloren (TSV-Diff / FK / integrity)"
           elif [ "${CRASH_COUNT:-0}" -gt 0 ]; then
             VERDICT=FAIL
             BL="Absturz nach dem Upgrade"
@@ -353,16 +381,19 @@ jobs:
           [ -n "$BL" ] && export BLOCKER="$BL"
           ./scripts/normalize-result.sh
 
+      - name: Hard-Gate result.json und SUMMARY.md
+        if: always()
+        run: |
+          EV="${RUNNER_TEMP:-/tmp}/nectar-evidence"
+          test -s "$EV/result.json" || { echo "GATE-FAIL: $EV/result.json fehlt oder leer"; exit 1; }
+          test -s "$EV/SUMMARY.md" || { echo "GATE-FAIL: $EV/SUMMARY.md fehlt oder leer"; exit 1; }
+          echo "result.json + SUMMARY.md vorhanden"
+
       - name: Ergebnis als Beleg sichern
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: upgrade-result-${{ inputs.app }}-${{ inputs.request_id }}
-          # P2-Fix 2026-10-13: result.json/SUMMARY.md werden von
-          # normalize-result.sh im Evidence-Verzeichnis erzeugt, nicht im
-          # Repo-Root. Auch alle Zwischendiagnosen (Seed/Verify/Bootstrap-
-          # Logs, Schema-Dumps, DB-Snapshots) werden hochgeladen, damit
-          # auch fehlgeschlagene Läufe belegfährig bleiben.
           path: |
             ${{ runner.temp }}/nectar-evidence/result.json
             ${{ runner.temp }}/nectar-evidence/SUMMARY.md
@@ -371,5 +402,7 @@ jobs:
             ${{ runner.temp }}/nectar-evidence/upgrade-db/**
             ${{ runner.temp }}/nectar-evidence/*.log
             ${{ runner.temp }}/nectar-evidence/*.txt
-          if-no-files-found: ignore
+            ${{ runner.temp }}/nectar-evidence/*.sql
+            ${{ runner.temp }}/nectar-evidence/*.tsv
+          if-no-files-found: error
           retention-days: 7
