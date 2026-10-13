@@ -330,7 +330,9 @@ jobs:
           # App-Crash-Scan: nur am_crash des Pakets UND FATAL EXCEPTION, die
           # NICHT vom uiautomator-Shell-Kommando stammt (DumpCommand-Crash bei
           # UiAutomation-Timeout ist Testinfrastruktur, nicht die App).
-          CRASH_COUNT=$( { grep -E "am_crash.*${PACKAGE}" "$EV/logcat/full-logcat.txt" 2>/dev/null;                            grep "FATAL EXCEPTION" "$EV/logcat/full-logcat.txt" 2>/dev/null                              | grep -cv "uiautomator"; } 2>/dev/null | wc -l | tr -d ' ' )
+          APP_CRASHES=$(grep -cE "am_crash.*${PACKAGE}" "$EV/logcat/full-logcat.txt" 2>/dev/null || echo 0)
+          OTHER_FATALS=$(grep "FATAL EXCEPTION" "$EV/logcat/full-logcat.txt" 2>/dev/null | grep -cv "uiautomator" || echo 0)
+          CRASH_COUNT=$(( ${APP_CRASHES:-0} + ${OTHER_FATALS:-0} ))
           CRASH_COUNT="${CRASH_COUNT:-0}"
           case "$CRASH_COUNT" in ''|*[!0-9]*) CRASH_COUNT=0 ;; esac
           echo "CRASH_COUNT=$CRASH_COUNT" >> "$GITHUB_ENV"
