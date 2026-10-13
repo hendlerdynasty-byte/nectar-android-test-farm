@@ -1,0 +1,376 @@
+name: android-upgrade-vinylbase
+
+# In-Place-Upgrade-Regression für VinylBase (app.vinylbase.local) — SESSION-VINYLBASE-01.
+#
+# Anders als android-upgrade.yml (PlayBoard, Room-DB) nutzt VinylBase SharedPreferences:
+# `shared_prefs/vinylbase_prefs.xml`, Key `records_json`, URL-encoded Records mit
+# `|`-Trennung. Der Seed ist der ECHTE First-Run-Pfad der App (Demo-Einträge
+# Pink Floyd / Miles Davis / Daft Punk via catalog.add + persist in onCreate).
+#
+# Ablauf:
+#   1. Baseline (produktions-signiertes Alt-Artefakt, vC8/1.2.2) installieren,
+#      Kaltstart -> App schreibt ihre echten First-Run-Daten selbst.
+#   2. Prefs-Snapshot via run-as (lesen, nie schreiben).
+#   3. Kandidat OHNE Deinstallation drüber installieren (adb install -r;
+#      Signierungskompatibilität ist fail-closed durch die APK-Signatur selbst).
+#   4. Kandidaten-Kaltstart -> decodeRecords-Migration mit getOrElse-Defaults.
+#   5. Migration-Nachweis: Record-IDs im Prefs-File UNVERÄNDERT (ein Fallback-
+#      Re-Seed würde neue UUIDs schreiben), UI-Renderproof via uiautomator,
+#      logcat ohne FATAL EXCEPTION.
+#
+# Datenschutz-Eigenschaften (wie android-upgrade.yml):
+#   * Die Farm klont NIEMALS das private App-Repository; nur opake Build-IDs.
+#   * Baseline- und Kandidaten-APK kommen pro Lauf von der privaten Bridge.
+#   * Kein synthetisches Schema, kein direkter Insert: die App schreibt selbst.
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: 'UUID der Anfrage'
+        required: true
+        type: string
+      app:
+        description: 'Kanonische App-Kennung (z. B. vinylbase-s1)'
+        required: true
+        type: string
+      package:
+        description: 'Android-Paketname (app.vinylbase.local)'
+        required: true
+        type: string
+      build_id:
+        description: 'Opake UUID der Artefakte auf der privaten Bridge'
+        required: true
+        type: string
+      commit_sha:
+        description: 'Commit-SHA des Kandidaten-Repositorys'
+        required: true
+        type: string
+      baseline_apk:
+        description: 'Dateiname des Baseline-APK auf der Bridge'
+        required: true
+        type: string
+      candidate_apk:
+        description: 'Dateiname des Kandidaten-APK auf der Bridge'
+        required: true
+        type: string
+      baseline_sha256:
+        description: 'Erwartete SHA256 des Baseline-APK (fail closed)'
+        required: false
+        type: string
+      candidate_sha256:
+        description: 'Erwartete SHA256 des Kandidaten-APK (fail closed)'
+        required: false
+        type: string
+      version_name:
+        description: 'Versionsname des Kandidaten'
+        required: false
+        type: string
+      version_code:
+        description: 'Versionscode des Kandidaten'
+        required: false
+        type: string
+      target_api:
+        description: 'Android-API-Level des Emulators'
+        required: false
+        type: string
+
+concurrency:
+  group: upgrade-vinylbase-${{ inputs.app }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REQUEST_ID: ${{ inputs.request_id }}
+  APP_ID: ${{ inputs.app }}
+  PACKAGE: ${{ inputs.package }}
+  COMMIT_SHA: ${{ inputs.commit_sha }}
+  BASELINE_APK: ${{ inputs.baseline_apk }}
+  CANDIDATE_APK: ${{ inputs.candidate_apk }}
+  VERSION_NAME: ${{ inputs.version_name }}
+  VERSION_CODE: ${{ inputs.version_code }}
+  MODE: upgrade-vinylbase
+
+jobs:
+  upgrade-vinylbase:
+    name: Upgrade ${{ inputs.baseline_apk }} -> ${{ inputs.candidate_apk }} auf API ${{ inputs.target_api }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Kontext protokollieren
+        run: |
+          echo "app=$APP_ID package=$PACKAGE baseline=$BASELINE_APK candidate=$CANDIDATE_APK commit=${COMMIT_SHA:0:12}"
+          echo "VinylBase-Seeding via echtem First-Run-Pfad (Demo-Einträge durch catalog.add+persist)"
+
+      - name: Baseline-APK von der privaten Bridge holen
+        env:
+          BRIDGE_URL: ${{ secrets.BRIDGE_URL }}
+          BRIDGE_TOKEN: ${{ secrets.BRIDGE_TOKEN }}
+          BUILD_ID: ${{ inputs.build_id }}
+          ARTIFACT_NAME: ${{ inputs.baseline_apk }}
+          ARTIFACT_SHA256: ${{ inputs.baseline_sha256 }}
+        run: ./scripts/fetch-artifact.sh
+
+      - name: Kandidaten-APK von der privaten Bridge holen
+        env:
+          BRIDGE_URL: ${{ secrets.BRIDGE_URL }}
+          BRIDGE_TOKEN: ${{ secrets.BRIDGE_TOKEN }}
+          BUILD_ID: ${{ inputs.build_id }}
+          ARTIFACT_NAME: ${{ inputs.candidate_apk }}
+          ARTIFACT_SHA256: ${{ inputs.candidate_sha256 }}
+        run: ./scripts/fetch-artifact.sh
+
+      - name: Artefakt-Integritaet bestaetigen
+        env:
+          WORK_ART: ${{ runner.temp }}/nectar-artifact
+        run: |
+          set -euo pipefail
+          EV="${RUNNER_TEMP:-/tmp}/nectar-evidence"
+          mkdir -p "$EV"
+          shasum -a 256 "$WORK_ART/$BASELINE_APK" "$WORK_ART/$CANDIDATE_APK" \
+            | tee "$EV/artefact-sha256.txt"
+          test -s "$WORK_ART/$BASELINE_APK" || { echo "Baseline-APK leer"; exit 31; }
+          test -s "$WORK_ART/$CANDIDATE_APK" || { echo "Kandidaten-APK leer"; exit 31; }
+
+      - name: Ziel-API bestimmen
+        env:
+          REQUESTED_API: ${{ inputs.target_api }}
+        run: |
+          set -euo pipefail
+          MIN=26
+          API="${REQUESTED_API:-34}"
+          case "$API" in ''|*[!0-9]*) echo "target_api keine Zahl" >&2; exit 1 ;; esac
+          [ "$API" -ge "$MIN" ] || { echo "API $API unter minSdk $MIN" >&2; exit 1; }
+          echo "Emulator API=$API (VinylBase minSdk=$MIN)"
+          echo "TARGET_API=$API" >> "$GITHUB_ENV"
+
+      - name: Emulator booten
+        env:
+          TARGET_TAG: google_apis
+          TARGET_ARCH: x86_64
+        run: |
+          set -uo pipefail
+          TARGET_API="${TARGET_API:-34}" bash ./scripts/boot-emulator.sh || {
+            ls -la "$HOME/.android/avd" 2>&1 | head -5 || true
+            exit 23
+          }
+
+      - name: Upgrade-Test ausfuehren (VinylBase SharedPreferences)
+        env:
+          WORK_ART: ${{ runner.temp }}/nectar-artifact
+        run: |
+          set -uo pipefail
+          EV="${RUNNER_TEMP:-/tmp}/nectar-evidence"
+          mkdir -p "$EV/screenshots" "$EV/logcat" "$EV/upgrade-prefs"
+          log() { printf '%s [upgrade-vinylbase] %s\n' "$(date -u +%FT%TZ)" "$1" >&2; }
+          with_timeout() {
+            local seconds="$1"; shift
+            if command -v timeout >/dev/null 2>&1; then timeout "$seconds" "$@"
+            else perl -e 'alarm shift; exec @ARGV' "$seconds" "$@"
+            fi
+          }
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          ADB="$(command -v adb 2>/dev/null || true)"
+          [ -n "$ADB" ] || ADB="${SDK}/platform-tools/adb"
+          [ -x "$ADB" ] || { log "adb nicht gefunden"; exit 40; }
+
+          for i in $(seq 1 60); do
+            BOOT=$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+            [ "$BOOT" = "1" ] && break
+            sleep 5
+          done
+          [ "$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] \
+            || { log "Emulator nicht gebootet"; exit 41; }
+          log "Emulator bereit"
+
+          resolve_launcher() {
+            "$ADB" shell cmd package resolve-activity --brief -a android.intent.action.MAIN \
+              -c android.intent.category.LAUNCHER "$PACKAGE" 2>/dev/null | tr -d '\r' | tail -1
+          }
+
+          PREFS_FILE="shared_prefs/vinylbase_prefs.xml"
+
+          # 1) Baseline frisch installieren
+          "$ADB" uninstall "$PACKAGE" >/dev/null 2>&1 || true
+          log "Baseline-Installation: $BASELINE_APK"
+          OUT=$("$ADB" install -r "$WORK_ART/$BASELINE_APK" 2>&1)
+          if echo "$OUT" | grep -qi "success"; then
+            echo "BASELINE_INSTALL_OK=1" >> "$GITHUB_ENV"; log "Baseline installiert"
+          else
+            log "Baseline fehlgeschlagen: $OUT"; exit 31
+          fi
+
+          # 2) Baseline-Kaltstart -> App legt ECHTE First-Run-Daten an
+          #    (onCreate: savedRaw blank -> 3 Demo-Einträge + persist()).
+          ACT=$(resolve_launcher)
+          case "$ACT" in "$PACKAGE"/*) ;; *) log "Launcher nicht auflösbar: $ACT"; exit 32 ;; esac
+          log "Baseline-Kaltstart: $ACT"
+          "$ADB" shell am start -W -n "$ACT" > "$EV/baseline-start.txt" 2>&1 || true
+          sleep 8
+
+          # 3) Prefs-Snapshot (nur lesen) + Seed-Sanity
+          "$ADB" shell am force-stop "$PACKAGE" || true
+          sleep 2
+          if ! $ADB exec-out run-as "$PACKAGE" cat "$PREFS_FILE" \
+              > "$EV/upgrade-prefs/baseline-prefs.xml" 2>"$EV/upgrade-prefs/baseline-prefs.err" \
+              || ! grep -q "records_json" "$EV/upgrade-prefs/baseline-prefs.xml"; then
+            log "Baseline-Prefs nicht angelegt (First-Run-Persist fehlgeschlagen)"
+            cat "$EV/upgrade-prefs/baseline-prefs.err" >&2 || true
+            cat "$EV/baseline-start.txt" >&2 || true
+            exit 35
+          fi
+          # Demo-Sanity: Mindestens 2 der 3 Demo-Einträge müssen im Records-String stehen
+          DEMO_HITS=0
+          for n in "Pink+Floyd" "Miles+Davis" "Daft+Punk"; do
+            grep -q "$n" "$EV/upgrade-prefs/baseline-prefs.xml" && DEMO_HITS=$((DEMO_HITS+1))
+          done
+          log "Demo-Seed-Treffer in Baseline-Prefs: $DEMO_HITS/3"
+          [ "$DEMO_HITS" -ge 2 ] || { log "Baseline-Seed unvollständig"; exit 35; }
+          # Record-IDs extrahieren (UUID v4-Muster im URL-encoded Records-String)
+          grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
+            "$EV/upgrade-prefs/baseline-prefs.xml" | sort > "$EV/upgrade-prefs/baseline-ids.txt"
+          IDS_BASELINE=$(wc -l < "$EV/upgrade-prefs/baseline-ids.txt" | tr -d ' ')
+          log "Baseline-Record-IDs: $IDS_BASELINE"
+          [ "$IDS_BASELINE" -ge 3 ] || { log "Zu wenige Records im Baseline-Bestand"; exit 35; }
+
+          # 4) Kandidat OHNE Deinstallation installieren (in-place)
+          log "Kandidaten-Upgrade (adb install -r, kein uninstall): $CANDIDATE_APK"
+          OUT=$("$ADB" install -r "$WORK_ART/$CANDIDATE_APK" 2>&1)
+          if echo "$OUT" | grep -qi "success"; then
+            echo "UPGRADE_INSTALL_OK=1" >> "$GITHUB_ENV"; log "Upgrade installiert (in-place)"
+          else
+            log "Kandidat fehlgeschlagen: $OUT"
+            echo "UPGRADE_INSTALL_OK=0" >> "$GITHUB_ENV"
+            exit 34
+          fi
+
+          # 5) Kandidaten-Kaltstart -> decodeRecords-Migration
+          "$ADB" logcat -c >/dev/null 2>&1 || true
+          "$ADB" shell am start -W -n "$ACT" > "$EV/candidate-start.txt" 2>&1 || true
+          sleep 8
+
+          # 6) Migration-Nachweis: IDs UNVERÄNDERT (Fallback-Re-Seed würde neue
+          #    UUIDs schreiben); UI-Renderproof via uiautomator dump.
+          "$ADB" shell am force-stop "$PACKAGE" || true
+          sleep 2
+          if ! $ADB exec-out run-as "$PACKAGE" cat "$PREFS_FILE" \
+              > "$EV/upgrade-prefs/after-prefs.xml" 2>"$EV/upgrade-prefs/after-prefs.err" \
+              || ! grep -q "records_json" "$EV/upgrade-prefs/after-prefs.xml"; then
+            log "After-Prefs nicht lesbar"
+            cat "$EV/upgrade-prefs/after-prefs.err" >&2 || true
+            exit 39
+          fi
+          grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
+            "$EV/upgrade-prefs/after-prefs.xml" | sort > "$EV/upgrade-prefs/after-ids.txt"
+          if diff -u "$EV/upgrade-prefs/baseline-ids.txt" "$EV/upgrade-prefs/after-ids.txt" \
+              > "$EV/upgrade-prefs/diff-ids.txt" 2>/dev/null; then
+            echo "DATA_PRESERVED_IDS=1" >> "$GITHUB_ENV"
+            log "Record-IDs byte-genau erhalten (kein Fallback-Re-Seed)"
+          else
+            echo "DATA_PRESERVED_IDS=0" >> "$GITHUB_ENV"
+            log "Record-IDs verändert — Migration hat Bestand neu geseedet oder verloren"
+            cat "$EV/upgrade-prefs/diff-ids.txt" >&2 || true
+          fi
+
+          # UI-Renderproof: Liste muss migrierte Records zeigen
+          UI_OK=0
+          with_timeout 30 "$ADB" shell uiautomator dump /sdcard/uidump.xml >/dev/null 2>&1 || true
+          $ADB shell cat /sdcard/uidump.xml > "$EV/screenshots/upgrade-uidump.xml" 2>/dev/null || true
+          if [ -s "$EV/screenshots/upgrade-uidump.xml" ]; then
+            UI_HITS=0
+            for n in "Kind of Blue" "Autobahn" "Discovery"; do
+              grep -q "$n" "$EV/screenshots/upgrade-uidump.xml" && UI_HITS=$((UI_HITS+1))
+            done
+            log "UI-Renderproof-Treffer: $UI_HITS/3"
+            [ "$UI_HITS" -ge 2 ] && UI_OK=1
+          fi
+          echo "UI_RENDER_OK=$UI_OK" >> "$GITHUB_ENV"
+
+          # 7) Screenshot-Beweis
+          SHOT_OK=0
+          for TRY in 1 2 3; do
+            if with_timeout 45 "$ADB" exec-out screencap -p > "$EV/screenshots/upgrade-foreground.png" 2>/dev/null; then
+              [ -s "$EV/screenshots/upgrade-foreground.png" ] && { SHOT_OK=1; break; }
+            fi
+            "$ADB" shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+            sleep 4
+          done
+          echo "SHOT_OK=$SHOT_OK" >> "$GITHUB_ENV"
+
+          # 8) Logcat + Crash-Scan
+          with_timeout 90 "$ADB" logcat -d -v threadtime -t 2000 > "$EV/logcat/full-logcat.txt" 2>/dev/null || true
+          CRASH_COUNT=$( { grep -cE "FATAL EXCEPTION|am_crash.*${PACKAGE}" "$EV/logcat/full-logcat.txt" 2>/dev/null || true; } | head -1 )
+          CRASH_COUNT="${CRASH_COUNT:-0}"
+          case "$CRASH_COUNT" in ''|*[!0-9]*) CRASH_COUNT=0 ;; esac
+          echo "CRASH_COUNT=$CRASH_COUNT" >> "$GITHUB_ENV"
+          log "Crash-Einträge: $CRASH_COUNT"
+
+          echo "TESTS_PASSED=1" >> "$GITHUB_ENV"
+          echo "TESTS_FAILED=0" >> "$GITHUB_ENV"
+          log "VinylBase-Upgrade-Test abgeschlossen"
+          exit 0
+
+      - name: Ergebnis normalisieren
+        if: always()
+        run: |
+          bash ./scripts/normalize-result.sh || true
+
+      - name: Evidence hochladen
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vinylbase-upgrade-evidence-${{ inputs.request_id }}
+          path: ${{ runner.temp }}/nectar-evidence
+          if-no-files-found: warn
+
+      - name: Verdict
+        if: always()
+        run: |
+          if [ -z "${DEVICE_API:-}" ]; then
+            VERDICT=INFRA_FAIL; BL="Emulator nicht bereit"
+          elif [ "${BASELINE_INSTALL_OK:-0}" != "1" ]; then
+            VERDICT=INFRA_FAIL; BL="Baseline-APK nicht installiert"
+          elif [ "${SEED_OK:-0}" != "1" ] && [ ! -s "${RUNNER_TEMP:-/tmp}/nectar-evidence/upgrade-prefs/baseline-prefs.xml" ]; then
+            VERDICT=INFRA_FAIL; BL="Baseline-First-Run-Seed fehlgeschlagen"
+          elif [ "${UPGRADE_INSTALL_OK:-0}" != "1" ]; then
+            VERDICT=FAIL; BL="In-Place-Upgrade-Install fehlgeschlagen (Signaturkompatibilität?)"
+          elif [ "${DATA_PRESERVED_IDS:-0}" != "1" ]; then
+            VERDICT=FAIL; BL="Datenbestand nicht erhalten (Record-IDs verändert)"
+          elif [ "${CRASH_COUNT:-1}" != "0" ]; then
+            VERDICT=FAIL; BL="Crash nach Upgrade (CRASH_COUNT=$CRASH_COUNT)"
+          elif [ "${UI_RENDER_OK:-0}" != "1" ]; then
+            VERDICT=FAIL; BL="UI zeigt migrierte Records nicht (Renderproof fehlgeschlagen)"
+          else
+            VERDICT=PASS; BL=""
+          fi
+          echo "VERDICT=$VERDICT"
+          echo "BLOCKER=$BL"
+          {
+            echo "{"
+            echo "  \"schema_version\": 1,"
+            echo "  \"request_id\": \"${REQUEST_ID}\","
+            echo "  \"app\": \"${APP_ID}\","
+            echo "  \"package\": \"${PACKAGE}\","
+            echo "  \"commit_sha\": \"${COMMIT_SHA}\","
+            echo "  \"version_name\": \"${VERSION_NAME}\","
+            echo "  \"version_code\": \"${VERSION_CODE}\","
+            echo "  \"mode\": \"upgrade-vinylbase\","
+            echo "  \"baseline_apk\": \"${BASELINE_APK}\","
+            echo "  \"candidate_apk\": \"${CANDIDATE_APK}\","
+            echo "  \"verdict\": \"${VERDICT}\","
+            echo "  \"blocker\": \"${BL}\","
+            echo "  \"data_preserved_ids\": \"${DATA_PRESERVED_IDS:-0}\","
+            echo "  \"ui_render_ok\": \"${UI_RENDER_OK:-0}\","
+            echo "  \"crash_count\": \"${CRASH_COUNT:-0}\""
+            echo "}"
+          } > "${RUNNER_TEMP:-/tmp}/nectar-evidence/result.json"
+          cat "${RUNNER_TEMP:-/tmp}/nectar-evidence/result.json"
+          [ "$VERDICT" = "PASS" ] || exit 1
