@@ -204,7 +204,22 @@ jobs:
           "$ADB" shell wm dismiss-keyguard >/dev/null 2>&1 || true
           sleep 1
           "$ADB" shell settings put global stay_on_while_plugged_in 3 >/dev/null 2>&1 || true
-          log "Emulator bereit (Screen wach, Keyguard dismissed)"
+          # Boot-Settle: Emulator-System unter Last direkt nach dem Boot
+          # anfällig für "Process system isn't responding"-ANR-Dialoge
+          # (beobachtet in Run 38472939837, Dumps 3-13).
+          log "Warte 45s Boot-Settle..."
+          sleep 45
+          dismiss_anr() {
+            local c
+            c=$(grep -oE 'text="Wait"[^>]*bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"' "$EV/ui-dumps/uidump-$UIDUMP_N.xml" 2>/dev/null | head -1 | sed -E 's/.*\[([0-9]+),([0-9]+)\]\[([0-9]+),([0-9]+)\].*/\1 \2 \3 \4/')
+            [ -n "$c" ] || return 1
+            set -- $c
+            "$ADB" shell input tap $(( ($1 + $3) / 2 )) $(( ($2 + $4) / 2 )) >/dev/null 2>&1
+            log "ANR-Dialog 'Wait' getippt"
+            sleep 5
+            return 0
+          }
+          log "Emulator bereit (Screen wach, Keyguard dismissed, Settle ok)"
 
           # ---------- UI-Automation-Helfer (resource-id-basiert, mit Retry) ----------
           PKG_RES="com.hendlerdynasty.vinylbase"
@@ -216,7 +231,14 @@ jobs:
               "$ADB" shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
               with_timeout 30 "$ADB" shell uiautomator dump /sdcard/uidump.xml >/dev/null 2>&1 || true
               "$ADB" shell cat /sdcard/uidump.xml > "$EV/ui-dumps/uidump-$UIDUMP_N.xml" 2>/dev/null || true
-              [ -s "$EV/ui-dumps/uidump-$UIDUMP_N.xml" ] && return 0
+              if [ -s "$EV/ui-dumps/uidump-$UIDUMP_N.xml" ]; then
+                if grep -q "isn't responding" "$EV/ui-dumps/uidump-$UIDUMP_N.xml" 2>/dev/null; then
+                  dismiss_anr || true
+                  sleep 5
+                  continue
+                fi
+                return 0
+              fi
               sleep 5
             done
             with_timeout 20 "$ADB" exec-out screencap -p > "$EV/screenshots/dump-failed-$UIDUMP_N.png" 2>/dev/null || true
