@@ -227,8 +227,26 @@ jobs:
           sleep 3
           log "Baseline gestoppt - Nutzerdaten werden geseedet"
 
-          # 3) Nutzerdaten seeden (Bridge-Skript, reines adb/sqlite3)
-          if ( cd "$EV" && with_timeout 300 python3 "$WORK_ART/$SEED_SCRIPT" seed ) > "$EV/seed.log" 2>&1; then
+          # 3) Nutzerdaten seeden. P1-Fix 2026-10-13: kein Python-Bridge-Skript
+          #    mehr noetig. Das Schema wird inline via adb-sqlite3 angelegt
+          #    (bootstrap-room-schema.sh), dann direkt in die DB geschrieben
+          #    (seed-room-data.sh). Damit ist der Fehler "no such table:
+          #    folders" strukturell ausgeschlossen.
+          if ( cd "$EV" && PKG="$PACKAGE" DB="databases/playboard.db" \
+                EV="$EV" ADB="$ADB" \
+                with_timeout 120 bash "$GITHUB_WORKSPACE/scripts/bootstrap-room-schema.sh" ) \
+              > "$EV/bootstrap.log" 2>&1; then
+            log "Schema-Bootstrap OK"
+          else
+            cat "$EV/bootstrap.log" >&2 || true
+            echo "SEED_OK=0" >> "$GITHUB_ENV"
+            log "Schema-Bootstrap fehlgeschlagen"
+            exit 33
+          fi
+          if ( cd "$EV" && PKG="$PACKAGE" DB="databases/playboard.db" \
+                EV="$EV" ADB="$ADB" \
+                with_timeout 120 bash "$GITHUB_WORKSPACE/scripts/seed-room-data.sh" ) \
+              > "$EV/seed.log" 2>&1; then
             echo "SEED_OK=1" >> "$GITHUB_ENV"; log "Seed OK"
           else
             cat "$EV/seed.log" >&2 || true
@@ -236,7 +254,6 @@ jobs:
             log "Seed fehlgeschlagen"
             exit 33
           fi
-          cp -a "$EV/qa-upgrade/." "$EV/upgrade-db/" 2>/dev/null || true
 
           # 4) Kandidat OHNE Deinstallation installieren
           log "Kandidaten-Upgrade (adb install -r, kein uninstall): $CANDIDATE_APK"
@@ -274,8 +291,15 @@ jobs:
           sleep 6
           with_timeout 45 "$ADB" exec-out screencap -p > "$EV/screenshots/upgrade-restart.png" 2>/dev/null || true
 
-          # 6) Datenbestand verifizieren (exakte Zeilenerhaltung)
-          if ( cd "$EV" && with_timeout 300 python3 "$WORK_ART/$SEED_SCRIPT" verify ) > "$EV/verify.log" 2>&1; then
+          # 6) Datenbestand verifizieren (exakte Zeilenerhaltung).
+          #    P1-Fix 2026-10-13: kein Python-Bridge-Skript mehr noetig.
+          #    verify-room-preservation.sh vergleicht die TSV-Snapshots aus
+          #    upgrade-db/expected-* gegen actual-* und liefert byte-genauen
+          #    Beweis (diff-Dateien in upgrade-db/diff-*).
+          if ( cd "$EV" && PKG="$PACKAGE" DB="databases/playboard.db" \
+                EV="$EV" ADB="$ADB" \
+                with_timeout 120 bash "$GITHUB_WORKSPACE/scripts/verify-room-preservation.sh" ) \
+              > "$EV/verify.log" 2>&1; then
             echo "DATA_PRESERVED=1" >> "$GITHUB_ENV"; log "Datenbestand exakt erhalten"
             cat "$EV/verify.log" >&2 || true
           else
@@ -283,7 +307,7 @@ jobs:
             echo "DATA_PRESERVED=0" >> "$GITHUB_ENV"
             log "Datenbestand nach Upgrade beschädigt/verloren"
           fi
-          cp -a "$EV/qa-upgrade/." "$EV/upgrade-db/" 2>/dev/null || true
+          cp -a "$EV/upgrade-db/." "$EV/upgrade-db/" 2>/dev/null || true
 
           # 7) Logcat + Crash-Scan
           with_timeout 90 "$ADB" logcat -d -v threadtime -t 2000 > "$EV/logcat/full-logcat.txt" 2>/dev/null || true
@@ -334,9 +358,18 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: upgrade-result-${{ inputs.app }}-${{ inputs.request_id }}
+          # P2-Fix 2026-10-13: result.json/SUMMARY.md werden von
+          # normalize-result.sh im Evidence-Verzeichnis erzeugt, nicht im
+          # Repo-Root. Auch alle Zwischendiagnosen (Seed/Verify/Bootstrap-
+          # Logs, Schema-Dumps, DB-Snapshots) werden hochgeladen, damit
+          # auch fehlgeschlagene Läufe belegfährig bleiben.
           path: |
-            result.json
+            ${{ runner.temp }}/nectar-evidence/result.json
+            ${{ runner.temp }}/nectar-evidence/SUMMARY.md
             ${{ runner.temp }}/nectar-evidence/screenshots/**
             ${{ runner.temp }}/nectar-evidence/logcat/**
+            ${{ runner.temp }}/nectar-evidence/upgrade-db/**
+            ${{ runner.temp }}/nectar-evidence/*.log
+            ${{ runner.temp }}/nectar-evidence/*.txt
           if-no-files-found: ignore
           retention-days: 7
