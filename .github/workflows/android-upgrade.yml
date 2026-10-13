@@ -32,7 +32,12 @@ on:
         required: true
         type: string
       package:
-        description: 'Android-Paketname (Baseline und Kandidat identisch)'
+        description: 'Android-Paketname. Bei PlayBoard mit Debug-Build immer
+          "app.playboard.basketball.debug" (applicationIdSuffix .debug). Der
+          QaUpgradeReceiver existiert NUR in V2 unter diesem Suffix; mit
+          "app.playboard.basketball" (Production-Suffix) ist der Receiver
+          nicht im APK und der Workflow akzeptiert den V1-Default-Stand als
+          Seed.'
         required: true
         type: string
       build_id:
