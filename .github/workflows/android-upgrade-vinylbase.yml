@@ -263,7 +263,10 @@ jobs:
           find_bounds() {
             local key="$1" raw coords x1 y1 x2 y2
             [ -s "$EV/ui-dumps/uidump-$UIDUMP_N.xml" ] || return 1
-            raw=$(grep -oE "(resource-id=\"$PKG_RES:id/$key\"|text=\"$key\")[^>]*bounds=\"\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]\"" \
+            # Case-insensitive: Material-Buttons wenden textAllCaps an —
+            # "Hinzufügen" erscheint im Dump als "HINZUFÜGEN"
+            # (Run 38500934551, Dumps 10-11: Button vorhanden, Match scheiterte).
+            raw=$(grep -ioE "(resource-id=\"$PKG_RES:id/$key\"|text=\"$key\")[^>]*bounds=\"\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]\"" \
                     "$EV/ui-dumps/uidump-$UIDUMP_N.xml" 2>/dev/null | head -1)
             [ -n "$raw" ] || return 1
             coords=$(printf '%s' "$raw" | sed -E 's/.*bounds="\[([0-9]+),([0-9]+)\]\[([0-9]+),([0-9]+)\]".*/\1 \2 \3 \4/')
@@ -305,7 +308,7 @@ jobs:
             sleep 1
           }
           ui_contains() {
-            grep -q -- "$1" "$EV/ui-dumps/uidump-$UIDUMP_N.xml" 2>/dev/null
+            grep -iq -- "$1" "$EV/ui-dumps/uidump-$UIDUMP_N.xml" 2>/dev/null
           }
           resolve_launcher() {
             "$ADB" shell cmd package resolve-activity --brief -a android.intent.action.MAIN \
