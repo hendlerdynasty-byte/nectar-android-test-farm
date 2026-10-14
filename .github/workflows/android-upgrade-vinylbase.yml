@@ -219,7 +219,15 @@ jobs:
             sleep 5
             return 0
           }
-          log "Emulator bereit (Screen wach, Keyguard dismissed, Settle ok)"
+          # Display vergrößern: boot-emulator liefert einen sehr kleinen
+          # Screen (~320px breit, Evidenz-Dumps Run 38494058210 bounds bis
+          # [320,616]); der Add-Dialog mit 10 Feldern ist höher als der
+          # Viewport, der Positive-Button bleibt selbst nach Scrollen
+          # unsichtbar. 1080x2100 gibt dem Dialog Platz.
+          "$ADB" shell wm size 1080x2100 >/dev/null 2>&1 || true
+          sleep 3
+          "$ADB" shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+          log "Emulator bereit (Screen wach, Keyguard dismissed, Settle ok, Display 1080x2100)"
 
           # ---------- UI-Automation-Helfer (resource-id-basiert, mit Retry) ----------
           # uiautomator resource-ids sind mit der applicationId des
