@@ -290,16 +290,25 @@ jobs:
             return 1
           }
           type_into() {
-            local key="$1" text="$2"
-            tap_ui "$key" 5 || return 1
-            sleep 1
-            "$ADB" shell input text "$text" >/dev/null 2>&1
-            sleep 1
-            # KEIN Keyevent hier: `adb input text` fügt ohne sichtbaren IME
-            # ein — BACK/ESC gingen in Runs 38486109193/38498094450 (Dumps 13+)
-            # direkt an den AlertDialog und brachen ihn ab. Bei 1080x2100 ist
-            # der Positive-Button im Viewport.
-            return 0
+            local key="$1" text="$2" try
+            for try in 1 2 3; do
+              tap_ui "$key" 3 || return 1
+              sleep 1
+              "$ADB" shell input text "$text" >/dev/null 2>&1
+              sleep 2
+              # Verifikation: das Feld muss den Text führen (Run 38508541137:
+              # Artist-Feld blieb leer — Validierung verwarf den Record).
+              dump_ui || continue
+              if grep -q -- "text=\"$text\"" "$EV/ui-dumps/uidump-$UIDUMP_N.xml" 2>/dev/null; then
+                return 0
+              fi
+              log "Text $text nicht im Feld $key (Try $try) — Feld leeren und erneut"
+              tap_ui "$key" 2 || true
+              local k
+              for k in $(seq 1 30); do "$ADB" shell input keyevent 67 >/dev/null 2>&1; done
+            done
+            log "Text konnte nicht in $key eingegeben werden"
+            return 1
           }
           # Dialog scrollen (Positive-Button liegt auf kleinen Screens unter-
           # halb des Viewports; Dialog hat 10 Felder).
@@ -342,6 +351,7 @@ jobs:
           echo "$OUT" | grep -qi "success" || { log "Baseline fehlgeschlagen: $OUT"; exit 31; }
           log "Baseline installiert"
           echo "BASELINE_INSTALL_OK=1" >> "$GITHUB_ENV"
+          echo "phase=onboarding-seed" >> "$EV/phase.txt"
 
           ACT=$(resolve_launcher)
           case "$ACT" in "$PACKAGE"/*) ;; *) log "Launcher nicht auflösbar: $ACT"; exit 32 ;; esac
@@ -388,6 +398,7 @@ jobs:
             ui_contains "$2" || { log "Record $2 nach Anlegen nicht in Liste"; return 1; }
             return 0
           }
+          echo "phase=add-records" >> "$EV/phase.txt"
           add_record "TestKuenstler1" "TestAlbumEins" || { log "Anlegen Record 1 fehlgeschlagen"; exit 50; }
           log "Record 1 angelegt"
           add_record "TestKuenstler2" "TestAlbumZwei" || { log "Anlegen Record 2 fehlgeschlagen"; exit 50; }
@@ -396,6 +407,7 @@ jobs:
           log "Record 3 angelegt"
 
           # ---------- 4) RECORD 1 ÜBER DIE UI BEARBEITEN ----------
+          echo "phase=edit-record" >> "$EV/phase.txt"
           # Zustandsmaschine (Run 38504808819: nach Langdruck zeigten Dumps
           # teils Liste, teils direkt den Entfernen-Dialog): bis zu 4 Versuche;
           # Entfernen-Dialog -> ABBRECHEN + Langdruck wiederholen; Options-
@@ -437,6 +449,7 @@ jobs:
           log "Record 1 bearbeitet -> TestKuenstler1EDITIERT (UI bestätigt)"
 
           # ---------- 5) BASELINE-PREFS-SNAPSHOT (nur lesen) ----------
+          echo "phase=prefs-snapshot" >> "$EV/phase.txt"
           "$ADB" shell am force-stop "$PACKAGE" || true
           sleep 2
           read_prefs "$EV/upgrade-prefs/baseline-prefs.xml" \
@@ -471,6 +484,7 @@ jobs:
           log "Import-CSV bereit in /sdcard/Download"
 
           # ================= 8) IN-PLACE-UPGRADE (kein uninstall) =================
+          echo "phase=upgrade-install" >> "$EV/phase.txt"
           log "Kandidaten-Upgrade (adb install -r): $CANDIDATE_APK"
           OUT=$("$ADB" install -r "$WORK_ART/$CANDIDATE_APK" 2>&1)
           echo "$OUT" | grep -qi "success" || { log "Kandidat fehlgeschlagen: $OUT"; exit 34; }
@@ -478,6 +492,7 @@ jobs:
           log "Upgrade installiert (in-place)"
 
           # ---------- 9) POST-UPGRADE-ASSERTIONS ----------
+          echo "phase=post-upgrade-assertions" >> "$EV/phase.txt"
           "$ADB" logcat -c >/dev/null 2>&1 || true
           cold_start "candidate-1"
           dump_ui || { log "Dump nach Upgrade fehlgeschlagen"; exit 60; }
@@ -559,16 +574,22 @@ jobs:
         if: always()
         run: |
           EV="${RUNNER_TEMP:-/tmp}/nectar-evidence"
+          PHASE=$(cat "$EV/phase.txt" 2>/dev/null | tail -1 | cut -d= -f2)
+          log "Letzte erreichte Phase: ${PHASE:-none}"
           if [ -z "${DEVICE_API:-}" ]; then
             VERDICT=INFRA_FAIL; BL="Emulator nicht bereit"
           elif [ "${BASELINE_INSTALL_OK:-0}" != "1" ]; then
             VERDICT=INFRA_FAIL; BL="Baseline-APK nicht installiert"
-          elif [ "${SEED_OK:-0}" != "1" ]; then
-            VERDICT=INFRA_FAIL; BL="Onboarding/Seed-Phase fehlgeschlagen (siehe Log-Schritt 'Upgrade-Test mit UI-Assertions')"
+          elif [ "${PHASE:-}" = "onboarding-seed" ]; then
+            VERDICT=INFRA_FAIL; BL="Onboarding/Seed-Phase fehlgeschlagen (Emulator-UI, nicht Produkt)"
+          elif [ "${PHASE:-}" = "add-records" ] || [ "${PHASE:-}" = "edit-record" ]; then
+            VERDICT=FAIL; BL="UI-Vorbereitung fehlgeschlagen in Phase $PHASE (Record-Anlegen/-Bearbeiten) — Upgrade wurde NICHT erreicht, keine Signatur-/Migrationsaussage"
+          elif [ "${PHASE:-}" = "prefs-snapshot" ]; then
+            VERDICT=FAIL; BL="Prefs-Snapshot/Export/Import-Vorbereitung fehlgeschlagen — Upgrade wurde NICHT erreicht"
           elif [ "${UPGRADE_INSTALL_OK:-0}" != "1" ]; then
-            VERDICT=FAIL; BL="In-Place-Upgrade-Install fehlgeschlagen (Signaturkompatibilität?)"
+            VERDICT=FAIL; BL="In-Place-Upgrade-Install fehlgeschlagen (Phase $PHASE) — mögliche Signaturkompatibilität"
           elif [ ! -s "$EV/upgrade-prefs/after-prefs.xml" ]; then
-            VERDICT=FAIL; BL="Post-Upgrade-Assertions nicht abgeschlossen (siehe Log-Schritt 'Upgrade-Test mit UI-Assertions')"
+            VERDICT=FAIL; BL="Post-Upgrade-Assertions nicht abgeschlossen (Phase $PHASE)"
           else
             VERDICT=PASS; BL=""
           fi
