@@ -396,8 +396,30 @@ jobs:
           log "Record 3 angelegt"
 
           # ---------- 4) RECORD 1 ÜBER DIE UI BEARBEITEN ----------
-          longpress_record "TestAlbumEins" || { log "Langdruck auf Record 1 fehlgeschlagen"; exit 51; }
-          tap_ui "Bearbeiten" 6 || { log "Bearbeiten-Option nicht gefunden"; exit 51; }
+          # Zustandsmaschine (Run 38504808819: nach Langdruck zeigten Dumps
+          # teils Liste, teils direkt den Entfernen-Dialog): bis zu 4 Versuche;
+          # Entfernen-Dialog -> ABBRECHEN + Langdruck wiederholen; Options-
+          # Dialog mit "Bearbeiten" -> tap.
+          EDIT_OK=0
+          for etry in 1 2 3 4; do
+            longpress_record "TestAlbumEins" || true
+            sleep 2
+            dump_ui || true
+            if ui_contains "Platte entfernen"; then
+              log "Entfernen-Dialog offen (Versuch $etry) — ABBRECHEN"
+              tap_ui "Abbrechen" 2 || true
+              sleep 2
+              continue
+            fi
+            if ui_contains "Bearbeiten"; then
+              if tap_ui "Bearbeiten" 3; then
+                EDIT_OK=1
+                log "Options-Dialog: Bearbeiten getippt (Versuch $etry)"
+                break
+              fi
+            fi
+          done
+          [ "$EDIT_OK" = "1" ] || { log "Bearbeiten-Option nicht erreichbar"; exit 51; }
           sleep 2
           tap_ui "et_artist" 6 || { log "et_artist im Bearbeiten-Dialog nicht gefunden"; exit 51; }
           for k in $(seq 1 13); do "$ADB" shell input keyevent 67 >/dev/null 2>&1; done
