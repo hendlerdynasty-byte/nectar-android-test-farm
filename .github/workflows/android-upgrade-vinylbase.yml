@@ -280,11 +280,18 @@ jobs:
             sleep 1
             "$ADB" shell input text "$text" >/dev/null 2>&1
             sleep 1
-            # IME schließen (ESC): sonst verdeckt die Soft-Tastatur die
-            # Dialog-Buttons (Run 38481389043: "Hinzufügen" nie sichtbar).
-            "$ADB" shell input keyevent 111 >/dev/null 2>&1 || true
+            # IME schließen: BACK schließt bei offenem IME nur die Tastatur,
+            # NICHT den Dialog (ESC/111 schließt den ganzen AlertDialog —
+            # Run 38486109193, Dumps 13+: Dialog weg, Liste sichtbar).
+            "$ADB" shell input keyevent 4 >/dev/null 2>&1 || true
             sleep 1
             return 0
+          }
+          # Dialog scrollen (Positive-Button liegt auf kleinen Screens unter-
+          # halb des Viewports; Dialog hat 10 Felder).
+          scroll_dialog() {
+            "$ADB" shell input swipe 160 480 160 200 400 >/dev/null 2>&1 || true
+            sleep 1
           }
           ui_contains() {
             grep -q -- "$1" "$EV/ui-dumps/uidump-$UIDUMP_N.xml" 2>/dev/null
@@ -355,7 +362,13 @@ jobs:
             sleep 2
             type_into "et_artist" "$1" || return 1
             type_into "et_album" "$2" || return 1
-            tap_ui "Hinzufügen" 6 || return 1
+            # Positive-Button finden; ggf. vorher im Dialog scrollen (bis zu 4x)
+            local found=0 s
+            for s in 1 2 3 4 5; do
+              if tap_ui "Hinzufügen" 2; then found=1; break; fi
+              scroll_dialog
+            done
+            [ "$found" = "1" ] || { log "Hinzufügen-Button nicht erreichbar"; return 1; }
             sleep 3
             dump_ui || return 1
             ui_contains "$2" || { log "Record $2 nach Anlegen nicht in Liste"; return 1; }
@@ -375,7 +388,14 @@ jobs:
           tap_ui "et_artist" 6 || { log "et_artist im Bearbeiten-Dialog nicht gefunden"; exit 51; }
           for k in $(seq 1 13); do "$ADB" shell input keyevent 67 >/dev/null 2>&1; done
           "$ADB" shell input text "TestKuenstler1EDITIERT" >/dev/null 2>&1
-          tap_ui "Hinzufügen" 6 || { log "Speichern (Hinzufügen) im Bearbeiten-Dialog nicht gefunden"; exit 51; }
+          "$ADB" shell input keyevent 4 >/dev/null 2>&1  # IME zu (BACK)
+          sleep 1
+          EFOUND=0
+          for s in 1 2 3 4 5; do
+            if tap_ui "Hinzufügen" 2; then EFOUND=1; break; fi
+            scroll_dialog
+          done
+          [ "$EFOUND" = "1" ] || { log "Speichern (Hinzufügen) im Bearbeiten-Dialog nicht gefunden"; exit 51; }
           sleep 3
           dump_ui || { log "Dump nach Bearbeitung fehlgeschlagen"; exit 51; }
           ui_contains "TestKuenstler1EDITIERT" || { log "Geänderter Wert nicht in Liste"; exit 51; }
