@@ -228,22 +228,26 @@ jobs:
           # resource-id="app.vinylbase.local:id/btn_skip".
           PKG_RES="$PACKAGE"
           UIDUMP_N=0
+          # Dumps sind auf dem Software-Emulator teuer (Run 38489669387:
+          # System-ANR-Loop unter Dump-Last). --compressed = kleinerer Baum;
+          # Pausen zwischen Versuchen größer; WAKE nur im Fehlerfall.
           dump_ui() {
             local d
             for d in 1 2 3; do
               UIDUMP_N=$((UIDUMP_N+1))
-              "$ADB" shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
-              with_timeout 30 "$ADB" shell uiautomator dump /sdcard/uidump.xml >/dev/null 2>&1 || true
+              with_timeout 45 "$ADB" shell uiautomator dump --compressed /sdcard/uidump.xml >/dev/null 2>&1 || true
               "$ADB" shell cat /sdcard/uidump.xml > "$EV/ui-dumps/uidump-$UIDUMP_N.xml" 2>/dev/null || true
               if [ -s "$EV/ui-dumps/uidump-$UIDUMP_N.xml" ]; then
                 if grep -q "isn't responding" "$EV/ui-dumps/uidump-$UIDUMP_N.xml" 2>/dev/null; then
                   dismiss_anr || true
-                  sleep 5
+                  sleep 8
                   continue
                 fi
+                sleep 2
                 return 0
               fi
-              sleep 5
+              "$ADB" shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+              sleep 8
             done
             with_timeout 20 "$ADB" exec-out screencap -p > "$EV/screenshots/dump-failed-$UIDUMP_N.png" 2>/dev/null || true
             return 1
@@ -261,15 +265,15 @@ jobs:
             echo "$(( (x1 + x2) / 2 )) $(( (y1 + y2) / 2 ))"
           }
           tap_ui() {
-            local key="$1" tries="${2:-4}" c
+            local key="$1" tries="${2:-4}" c t
             for t in $(seq 1 "$tries"); do
               dump_ui && c=$(find_bounds "$key") && [ -n "$c" ] && {
                 "$ADB" shell input tap $c >/dev/null 2>&1
                 log "tap $key -> $c (Try $t)"
-                sleep 2
+                sleep 3
                 return 0
               }
-              sleep 3
+              sleep 6
             done
             log "NICHT GEFUNDEN: $key"
             return 1
