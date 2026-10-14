@@ -292,11 +292,10 @@ jobs:
             sleep 1
             "$ADB" shell input text "$text" >/dev/null 2>&1
             sleep 1
-            # IME schließen: BACK schließt bei offenem IME nur die Tastatur,
-            # NICHT den Dialog (ESC/111 schließt den ganzen AlertDialog —
-            # Run 38486109193, Dumps 13+: Dialog weg, Liste sichtbar).
-            "$ADB" shell input keyevent 4 >/dev/null 2>&1 || true
-            sleep 1
+            # KEIN Keyevent hier: `adb input text` fügt ohne sichtbaren IME
+            # ein — BACK/ESC gingen in Runs 38486109193/38498094450 (Dumps 13+)
+            # direkt an den AlertDialog und brachen ihn ab. Bei 1080x2100 ist
+            # der Positive-Button im Viewport.
             return 0
           }
           # Dialog scrollen (Positive-Button liegt auf kleinen Screens unter-
@@ -400,7 +399,6 @@ jobs:
           tap_ui "et_artist" 6 || { log "et_artist im Bearbeiten-Dialog nicht gefunden"; exit 51; }
           for k in $(seq 1 13); do "$ADB" shell input keyevent 67 >/dev/null 2>&1; done
           "$ADB" shell input text "TestKuenstler1EDITIERT" >/dev/null 2>&1
-          "$ADB" shell input keyevent 4 >/dev/null 2>&1  # IME zu (BACK)
           sleep 1
           EFOUND=0
           for s in 1 2 3 4 5; do
